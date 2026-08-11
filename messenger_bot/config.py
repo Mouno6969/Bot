@@ -18,6 +18,10 @@ class Settings:
     user_data_dir: Path
     manus_api_key: str
     manus_api_base: str
+    meta_api_key: str | None
+    meta_api_base: str
+    meta_model: str
+    meta_max_tokens: int
     encryption_pin: str | None
     poll_interval_seconds: float
     context_characters: int
@@ -50,6 +54,14 @@ class Settings:
             manus_api_key=api_key,
             # api.manus.im is used because this authenticated account's task polling resolves there.
             manus_api_base=os.getenv("MANUS_API_BASE", "https://api.manus.im").rstrip("/"),
+            # Meta AI handles plain (non-command) mentions. If META_API_KEY is unset the bot
+            # transparently falls back to Manus for chat, so this stays optional and non-breaking.
+            meta_api_key=os.getenv("META_API_KEY", "").strip() or None,
+            meta_api_base=os.getenv("META_API_BASE", "https://api.meta.ai").rstrip("/"),
+            meta_model=os.getenv("META_MODEL", "muse-spark-1.2").strip(),
+            # muse-spark is a reasoning model that spends most of its budget on hidden reasoning
+            # tokens before emitting visible text, so a low cap yields empty replies. Keep it high.
+            meta_max_tokens=int(os.getenv("META_MAX_TOKENS", "2048")),
             encryption_pin=os.getenv("MESSENGER_ENCRYPTION_PIN", "").strip() or None,
             poll_interval_seconds=float(os.getenv("BOT_POLL_SECONDS", "5")),
             context_characters=int(os.getenv("BOT_CONTEXT_CHARACTERS", "6000")),

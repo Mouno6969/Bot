@@ -16,6 +16,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 from .config import Settings
 from .media import ManusMediaClient, MediaAsset, MediaError
+from .meta_ai import MetaChatClient, MetaError
 from .router import RequestKind, RoutedRequest, has_mention, help_text, missing_argument_text, parse_request
 
 
@@ -85,6 +86,7 @@ class MessengerBot:
         self.settings = settings
         self.state = BotState.load(settings.state_file)
         self.media = ManusMediaClient(settings)
+        self.meta = MetaChatClient(settings)
         self.last_observed_text = ""
         self.transcript = self._load_transcript()
 
@@ -316,6 +318,16 @@ Conversation history (oldest at the top, newest at the bottom):
 Reply only to the newest question or request addressed to you. Match the user’s language and script exactly: Bengali, Banglish, or English. Be concise, useful, and natural.
 
 For comparisons about fluency, manners, skills, or behavior, make claims only when the conversation history provides direct support. Name the observable examples briefly. If the history does not provide enough evidence, say that clearly instead of inventing a ranking, member fact, or history. Do not generate image, voice, song, or edit requests in normal chat—tell users to use the explicit slash command if relevant. Output only the message that should be posted."""
+        # Plain mentions (simple tasks) are answered by Meta AI; media commands stay on Manus.
+        # If Meta is unconfigured or errors, transparently fall back to a Manus text reply.
+        if self.meta.enabled:
+            try:
+                answer = (await self.meta.reply(prompt)).strip()
+                if answer:
+                    return answer
+                print("Meta AI returned an empty reply; falling back to Manus.")
+            except MetaError as error:
+                print(f"Meta AI reply error, falling back to Manus: {error}")
         try:
             answer = (await self.media.reply(prompt)).strip()
             return answer or "I could not prepare a reply just now—please mention me again."
