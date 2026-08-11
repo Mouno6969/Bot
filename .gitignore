@@ -1,0 +1,19 @@
+# Secrets and authenticated browser state
+.env
+bot_data_dir/
+bot_session.tar.gz*
+
+# Runtime state and generated media
+bot_state.json
+bot_logs.txt
+bot_pid.txt
+media_output/
+
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Operating-system files
+.DS_Store
