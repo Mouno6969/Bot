@@ -53,7 +53,13 @@ MANUS_API_KEY=your_current_manus_api_key
 MESSENGER_ENCRYPTION_PIN=your_pin_if_required
 ```
 
-Log in to the intended Facebook account once in the local Chromium profile at `BOT_USER_DATA_DIR`; this profile remains local to the host. Start the bot with:
+Log in to the intended Facebook account once in the local Chromium profile at `BOT_USER_DATA_DIR`; this profile remains local to the host. On a **headless server** (no display), import the session instead of a manual login — copy `c_user` and `xs` (optionally `datr`, `sb`, `fr`) from a logged-in browser and run:
+
+```bash
+FB_C_USER=... FB_XS=... python3 tools/import_session.py
+```
+
+The script injects the cookies into `BOT_USER_DATA_DIR`, opens the messages page, and verifies the login with a screenshot. Cookie values are never printed or committed. Start the bot with:
 
 ```bash
 chmod +x start_bot.sh
