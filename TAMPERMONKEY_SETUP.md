@@ -2,6 +2,10 @@
 
 This option runs the command client inside an already logged-in **desktop** Messenger tab. It is useful when the separate local Playwright profile has expired. The script does **not** run in mobile Chrome; use a computer with desktop Chrome, Edge, Brave, or Firefox.
 
+## Kiwi compatibility update
+
+If Messenger showed `GM_getValue is not defined`, replace your existing userscript with version **1.0.1** from `tampermonkey/messenger-ai-bot.user.js`. This version supports both legacy Tampermonkey storage functions, Kiwi’s newer storage API, and a local browser-storage fallback.
+
 ## Installation
 
 | Step | Action |

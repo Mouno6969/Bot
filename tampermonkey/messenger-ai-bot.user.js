@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Shahidulla Kaysar Messenger AI Bot
 // @namespace    https://github.com/Mouno6969/Bot
-// @version      1.0.0
+// @version      1.0.1
 // @description  Mention-based Messenger assistant with /image, /voice, /sing, and /edit commands.
 // @match        https://www.facebook.com/messages/*
 // @match        https://www.messenger.com/*
+// @grant        GM
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -55,11 +56,23 @@
     notify.timer = setTimeout(() => box.remove(), 6500);
   }
 
-  function getApiKey() {
-    let key = GM_getValue(CONFIG.keyName, '');
+  async function storageGet(key, fallback = '') {
+    if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+    if (typeof GM !== 'undefined' && typeof GM.getValue === 'function') return GM.getValue(key, fallback);
+    return window.localStorage.getItem(`sk_bot_${key}`) || fallback;
+  }
+
+  async function storageSet(key, value) {
+    if (typeof GM_setValue === 'function') return GM_setValue(key, value);
+    if (typeof GM !== 'undefined' && typeof GM.setValue === 'function') return GM.setValue(key, value);
+    window.localStorage.setItem(`sk_bot_${key}`, value);
+  }
+
+  async function getApiKey() {
+    let key = await storageGet(CONFIG.keyName, '');
     if (!key) {
-      key = window.prompt('Paste your Manus API key. It will be stored only in Tampermonkey local storage on this browser.');
-      if (key) GM_setValue(CONFIG.keyName, key.trim());
+      key = window.prompt('Paste your Manus API key. It will be stored only on this browser.');
+      if (key) await storageSet(CONFIG.keyName, key.trim());
     }
     return (key || '').trim();
   }
@@ -84,7 +97,7 @@
   }
 
   async function apiJson(method, path, body) {
-    const key = getApiKey();
+    const key = await getApiKey();
     if (!key) throw new Error('No Manus API key was entered.');
     const response = await request({
       method,
