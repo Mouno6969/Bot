@@ -25,6 +25,9 @@ class Settings:
     media_timeout_seconds: int
     state_file: Path
     output_dir: Path
+    history_file: Path
+    history_scrolls: int
+    history_characters: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,4 +57,7 @@ class Settings:
             media_timeout_seconds=int(os.getenv("BOT_MEDIA_TIMEOUT_SECONDS", "240")),
             state_file=Path(os.getenv("BOT_STATE_FILE", root / "bot_state.json")).expanduser().resolve(),
             output_dir=output_dir,
+            history_file=Path(os.getenv("BOT_HISTORY_FILE", root / "bot_history.txt")).expanduser().resolve(),
+            history_scrolls=int(os.getenv("BOT_HISTORY_SCROLLS", "40")),
+            history_characters=int(os.getenv("BOT_HISTORY_CHARACTERS", "120000")),
         )
