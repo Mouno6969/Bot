@@ -117,8 +117,9 @@ class MessengerBot:
                     continue
 
                 print("NEW MENTION DETECTED")
-                self._remember(fingerprint)  # persist before work to prevent duplicates after restart
                 await self._handle_request(page, context, new_text)
+                # Mark a message only after its response has been successfully delivered.
+                self._remember(fingerprint)
                 await asyncio.sleep(5)
             except Exception as error:
                 print(f"Monitor loop error: {error}")
@@ -185,12 +186,48 @@ For comparisons about fluency, manners, skills, or behavior, make claims only wh
             return "দুঃখিত, এখন উত্তরটা তৈরি করতে পারছি না। একটু পরে আবার mention দাও।"
 
     async def _send_text(self, page: Page, text: str) -> None:
-        input_box = page.locator("[role='textbox']").last
-        await input_box.fill(text)
-        await page.keyboard.press("Enter")
-        self.state.last_reply = text
-        self.state.save(self.settings.state_file)
-        print(f"Text reply sent: {text[:90]}")
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                input_box = await self._composer(page)
+                await input_box.click(timeout=15_000)
+                await input_box.fill(text, timeout=15_000)
+                await input_box.press("Enter", timeout=15_000)
+                self.state.last_reply = text
+                self.state.save(self.settings.state_file)
+                print(f"Text reply sent: {text[:90]}")
+                return
+            except Exception as error:
+                last_error = error
+                print(f"Composer send attempt {attempt} failed: {error}")
+                await self._recover_chat(page)
+        raise RuntimeError(f"Messenger composer unavailable after 3 attempts: {last_error}")
+
+    async def _composer(self, page: Page):
+        selectors = [
+            "div[role='textbox'][contenteditable='true']",
+            "[role='textbox'][contenteditable='true']",
+            "div[contenteditable='true']",
+        ]
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for selector in selectors:
+                candidates = page.locator(selector)
+                count = await candidates.count()
+                for index in range(count - 1, -1, -1):
+                    candidate = candidates.nth(index)
+                    if await candidate.is_visible():
+                        return candidate
+            await asyncio.sleep(1)
+        raise RuntimeError("No visible Messenger message composer was found.")
+
+    async def _recover_chat(self, page: Page) -> None:
+        try:
+            await page.goto(self.settings.group_url, wait_until="commit", timeout=60_000)
+            await asyncio.sleep(8)
+            await self._unlock_if_needed(page)
+        except Exception as error:
+            print(f"Chat recovery navigation failed: {error}")
 
     async def _send_media(self, page: Page, asset: MediaAsset) -> None:
         file_inputs = page.locator("input[type='file']")
@@ -204,7 +241,8 @@ For comparisons about fluency, manners, skills, or behavior, make claims only wh
                 chooser = await chooser_info.value
                 await chooser.set_files(str(asset.local_path))
             await asyncio.sleep(3)
-            await page.keyboard.press("Enter")
+            composer = await self._composer(page)
+            await composer.press("Enter", timeout=15_000)
         except Exception as error:
             raise MediaError(f"The media was generated but Messenger could not upload it: {error}") from error
 

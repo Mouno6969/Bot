@@ -62,6 +62,10 @@ chmod +x start_bot.sh
 
 Use `./start_bot.sh --foreground` while debugging. Runtime logs are written to `bot_logs.txt` and the process ID to `bot_pid.txt`.
 
+## Tampermonkey alternative
+
+If the local Playwright profile is logged out or you prefer to run the bot from an already logged-in desktop Messenger tab, install the companion userscript described in [TAMPERMONKEY_SETUP.md](TAMPERMONKEY_SETUP.md). It supports the same `/image`, `/voice`, `/sing`, `/edit`, and normal mention flows. The desktop browser must stay open, and the API key remains in local Tampermonkey storage rather than in Git.
+
 ## Reliability behavior
 
 The bot checkpoints the conversation when it starts, then considers only newly appended message text. It keeps a small persistent fingerprint history, rejects its own sent text, and processes each new mention once. Media tasks send an acknowledgement first, wait for a generated attachment, and fail cleanly rather than holding the monitor loop indefinitely.
