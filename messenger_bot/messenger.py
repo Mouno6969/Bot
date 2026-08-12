@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -59,6 +60,25 @@ _SCROLL_BOTTOM_JS = """
   if (el) el.scrollTop = el.scrollHeight;
 }
 """
+
+# Messenger's accessibility scrape labels every message with its author as
+# "… Message sent HH:MM by NAME: text". Extracting NAME from the WHOLE transcript
+# (not just the recent context window) lets the bot always know the full roster of
+# who is in the group, even for members who last spoke far outside the recent window.
+_SENDER_PATTERN = re.compile(r"Message sent[^\n]*? by ([^:\n]{1,60}?)(?::|$)", re.MULTILINE)
+
+
+def extract_members(transcript: str, max_members: int = 40) -> list[str]:
+    """Return distinct group members, most active first, from the full transcript."""
+    counts: dict[str, int] = {}
+    for name in _SENDER_PATTERN.findall(transcript):
+        name = " ".join(name.split()).strip()
+        # "You" is the bot's own account; it is not a group member to describe.
+        if not name or name.casefold() == "you":
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts, key=lambda n: (-counts[n], n))
+    return ranked[:max_members]
 
 
 @dataclass
@@ -308,16 +328,21 @@ class MessengerBot:
             await self._send_text(page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}")
 
     async def _answer_mention(self, context: str) -> str:
+        members = extract_members(self.transcript)
+        roster = ", ".join(members) if members else "unknown (history not yet loaded)"
         prompt = f"""You are {self.settings.bot_name}, replying inside a Messenger group.
 
-Conversation history (oldest at the top, newest at the bottom):
+Group members (everyone who has spoken in this group, most active first):
+{roster}
+
+Recent conversation history (oldest at the top, newest at the bottom):
 ---
 {context}
 ---
 
 Reply only to the newest question or request addressed to you. Match the user’s language and script exactly: Bengali, Banglish, or English. Be concise, useful, and natural.
 
-For comparisons about fluency, manners, skills, or behavior, make claims only when the conversation history provides direct support. Name the observable examples briefly. If the history does not provide enough evidence, say that clearly instead of inventing a ranking, member fact, or history. Do not generate image, voice, song, or edit requests in normal chat—tell users to use the explicit slash command if relevant. Output only the message that should be posted."""
+The "Group members" list above is the complete roster of who is in this group, drawn from the entire message history — trust it when asked who is in the group or who someone is, even if that person has not spoken in the recent history shown below. For comparisons about fluency, manners, skills, or behavior, make claims only when the conversation history provides direct support. Name the observable examples briefly. If the history does not provide enough evidence, say that clearly instead of inventing a ranking, member fact, or history. Do not generate image, voice, song, or edit requests in normal chat—tell users to use the explicit slash command if relevant. Output only the message that should be posted."""
         # Plain mentions (simple tasks) are answered by Meta AI; media commands stay on Manus.
         # If Meta is unconfigured or errors, transparently fall back to a Manus text reply.
         if self.meta.enabled:
