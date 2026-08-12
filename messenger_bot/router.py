@@ -15,6 +15,8 @@ class RequestKind(str, Enum):
     SING = "sing"
     HELP = "help"
     CALCULATE = "calculate"
+    VIDEO = "video"
+    MUSICVIDEO = "musicvideo"
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,8 @@ class RoutedRequest:
 # generator then dutifully reads aloud or sings. Stopping at the newline keeps
 # only what the user actually typed after the command.
 COMMAND_PATTERN = re.compile(
-    r"/(image|voice|edit|sing|help|calculate|stats)\b[ \t]*([^\n\r]*)", re.IGNORECASE
+    r"/(image|voice|edit|sing|help|calculate|stats|musicvideo|video)\b[ \t]*([^\n\r]*)",
+    re.IGNORECASE,
 )
 
 # "/stats" is a friendly alias for "/calculate"; both map to the same handler.
@@ -61,7 +64,8 @@ def parse_request(message_text: str) -> RoutedRequest:
 
 def help_text() -> str:
     return (
-        "Commands: /image <description>, /voice <text>, /sing <brief or lyrics>, "
+        "Commands: /image <description>, /video <prompt> (image + spoken voice), "
+        "/musicvideo <prompt> (image + original song), /voice <text>, /sing <brief or lyrics>, "
         "/edit <instruction> with an image attached in the same message, and "
         "/calculate for the group message count and per-member ranking. "
         "For all other questions, just mention me."
@@ -71,6 +75,8 @@ def help_text() -> str:
 def missing_argument_text(kind: RequestKind) -> str:
     examples = {
         RequestKind.IMAGE: "@Shahidulla /image a rainy Dhaka street at night",
+        RequestKind.VIDEO: "@Shahidulla /video shobai ke shubho sokal",
+        RequestKind.MUSICVIDEO: "@Shahidulla /musicvideo ekta upbeat bondhutturer gaan",
         RequestKind.VOICE: "@Shahidulla /voice আজকে সবাই কেমন আছো?",
         RequestKind.SING: "@Shahidulla /sing a 45-second upbeat Banglish friendship song",
         RequestKind.EDIT: "attach an image and write: @Shahidulla /edit make it a watercolor portrait",

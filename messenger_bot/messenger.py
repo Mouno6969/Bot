@@ -361,6 +361,23 @@ class MessengerBot:
             await self._send_text(page, missing_argument_text(request.kind))
             return
 
+        if request.kind in (RequestKind.VIDEO, RequestKind.MUSICVIDEO):
+            # Composed video: generate an image + audio from the one prompt, then mux
+            # locally. /video narrates with a spoken voice; /musicvideo uses a song.
+            audio_kind = RequestKind.SING if request.kind == RequestKind.MUSICVIDEO else RequestKind.VOICE
+            note = "gaan" if audio_kind == RequestKind.SING else "voice"
+            await self._send_text(page, f"Video ta banachhi (image + {note})—ektu somoy lagbe, wait koro.")
+            try:
+                asset = await self.media.generate_video(request.argument, audio_kind)
+                await self._send_media(page, asset)
+                self.state.last_reply = f"{request.kind.value} delivered"
+                self.state.save(self.settings.state_file)
+                print(f"Delivered {request.kind.value}: {asset.filename}")
+            except MediaError as error:
+                print(f"Video job failed: {error}")
+                await self._send_text(page, f"Sorry, video ta banate parlam na. {error}")
+            return
+
         if request.kind == RequestKind.EDIT:
             source_image = await self._download_recent_chat_image(page)
             if source_image is None:

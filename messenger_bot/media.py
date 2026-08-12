@@ -8,6 +8,7 @@ from typing import Any
 import asyncio
 import mimetypes
 import re
+import subprocess
 import time
 
 import requests
@@ -45,6 +46,51 @@ class ManusMediaClient:
         file_id = await asyncio.to_thread(self._upload_file, source_image) if source_image else None
         task_id = await asyncio.to_thread(self._create_task, kind, user_instruction, file_id)
         return await self._wait_for_asset(task_id, kind)
+
+    async def generate_video(self, prompt: str, audio_kind: RequestKind) -> MediaAsset:
+        """Compose a video locally from a generated image plus a generated audio track.
+
+        Manus native video is quota-limited to a couple of clips a day on the free plan,
+        so instead we generate the two cheap-and-plentiful parts — an image and either a
+        spoken voice (audio_kind=VOICE) or an original song (audio_kind=SING) — from the
+        SAME prompt, then mux them into an MP4 with ffmpeg. The two generations run
+        concurrently; the mux is a fast local step.
+        """
+        if audio_kind not in {RequestKind.VOICE, RequestKind.SING}:
+            raise MediaError(f"A composed video's audio must be voice or song, not {audio_kind.value}.")
+        image_asset, audio_asset = await asyncio.gather(
+            self.generate(RequestKind.IMAGE, prompt),
+            self.generate(audio_kind, prompt),
+        )
+        return await asyncio.to_thread(
+            self._compose_video, image_asset.local_path, audio_asset.local_path
+        )
+
+    def _compose_video(self, image_path: Path, audio_path: Path) -> MediaAsset:
+        """Loop a still image for the audio's duration and mux into one H.264/AAC MP4."""
+        filename = self._safe_filename(f"{Path(image_path).stem}_video", "video")
+        output_path = self.settings.output_dir / f"{int(time.time())}_{filename}"
+        command = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-loop", "1", "-i", str(image_path),
+            "-i", str(audio_path),
+            "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+            # yuv420p needs even dimensions; round width/height down to the nearest even number.
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",  # end the video when the audio ends
+            str(output_path),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=180)
+        except (subprocess.SubprocessError, OSError) as error:
+            raise MediaError(f"Could not run the video composer: {error}") from error
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "ignore").strip()[:300]
+            raise MediaError(f"Video composition failed: {detail or 'ffmpeg returned an error.'}")
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise MediaError("The composed video file was empty.")
+        return MediaAsset(local_path=output_path, media_type="video", filename=output_path.name)
 
     async def reply(self, prompt: str) -> str:
         """Create a lightweight text task and return its final assistant message."""
@@ -170,6 +216,12 @@ class ManusMediaClient:
                     if self._is_expected_media(kind, media_type):
                         return await asyncio.to_thread(self._download_asset, url, attachment, media_type)
 
+            # A quota/plan block can never resolve by waiting (Manus even retries in-task
+            # and hits the same wall), so fail fast with a clear message instead of polling
+            # the full timeout. Video is the common case: the free plan allows very few per day.
+            if self._is_quota_message(latest_message):
+                raise MediaError(self._quota_reason(kind))
+
             if self._latest_status(data) == "stopped":
                 now = time.monotonic()
                 if stopped_since is None:
@@ -181,6 +233,21 @@ class ManusMediaClient:
 
         hint = f" Generator said: {latest_message}" if latest_message else ""
         raise MediaError(f"The {kind.value} job finished without a usable attachment.{hint}")
+
+    @staticmethod
+    def _is_quota_message(text: str) -> bool:
+        lowered = (text or "").lower()
+        quota_markers = ("quota", "daily limit", "upgrade for", "free-plan", "free plan")
+        unavailable = ("unavailable" in lowered or "exhausted" in lowered or "reached" in lowered
+                       or "limit" in lowered)
+        return unavailable and any(marker in lowered for marker in quota_markers)
+
+    @staticmethod
+    def _quota_reason(kind: RequestKind) -> str:
+        return (
+            f"{kind.value} generation-er ajker quota shesh (free plan-e din e khub kom "
+            "banano jay). Kal abar try koro, othoba plan upgrade korle beshi banano jabe."
+        )
 
     def _list_messages(self, task_id: str) -> dict[str, Any]:
         response = requests.get(
@@ -211,6 +278,8 @@ class ManusMediaClient:
             return "image"
         if raw_type in {"audio", "music", "voice"} or content_type.startswith("audio/"):
             return "audio"
+        if raw_type in {"video", "movie"} or content_type.startswith("video/"):
+            return "video"
         return "file"
 
     @staticmethod
@@ -234,7 +303,8 @@ class ManusMediaClient:
         clean = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name).strip("._") or "generated_media"
         suffix = Path(clean).suffix
         if not suffix:
-            clean += ".png" if media_type == "image" else ".mp3"
+            default = {"image": ".png", "video": ".mp4"}.get(media_type, ".mp3")
+            clean += default
         return clean
 
     @staticmethod
