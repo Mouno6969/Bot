@@ -145,6 +145,14 @@ class ManusMediaClient:
     async def _wait_for_asset(self, task_id: str, kind: RequestKind) -> MediaAsset:
         deadline = time.monotonic() + self.settings.media_timeout_seconds
         latest_message = ""
+        # Manus can report the job "stopped" a poll or two BEFORE the final
+        # attachment message is committed to listMessages. Slow commands (sing has
+        # to compose music; edit uploads a source image and re-renders it) hit this
+        # race, and the old code broke on the same cycle the status flipped — losing
+        # the file and reporting "finished without a usable attachment". Keep polling
+        # for a short grace window after the first "stopped" so the trailing file lands.
+        stopped_since: float | None = None
+        grace_seconds = 30
 
         while time.monotonic() < deadline:
             await asyncio.sleep(4)
@@ -162,9 +170,14 @@ class ManusMediaClient:
                     if self._is_expected_media(kind, media_type):
                         return await asyncio.to_thread(self._download_asset, url, attachment, media_type)
 
-            status = self._latest_status(data)
-            if status == "stopped":
-                break
+            if self._latest_status(data) == "stopped":
+                now = time.monotonic()
+                if stopped_since is None:
+                    stopped_since = now
+                elif now - stopped_since >= grace_seconds:
+                    break
+            else:
+                stopped_since = None
 
         hint = f" Generator said: {latest_message}" if latest_message else ""
         raise MediaError(f"The {kind.value} job finished without a usable attachment.{hint}")
