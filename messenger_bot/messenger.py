@@ -67,6 +67,14 @@ _SCROLL_BOTTOM_JS = """
 # who is in the group, even for members who last spoke far outside the recent window.
 _SENDER_PATTERN = re.compile(r"Message sent[^\n]*? by ([^:\n]{1,60}?)(?::|$)", re.MULTILINE)
 
+# A fuller parse that also captures the timestamp and message text. Used to COUNT
+# messages: the transcript is stitched from overlapping scroll captures, so the same
+# message can appear many times. Deduplicating on (time, sender, text) turns the noisy
+# raw lines into a truthful per-member tally.
+_MESSAGE_PATTERN = re.compile(
+    r"Message sent\s*(\d{1,2}:\d{2})?\s*by ([^:\n]{1,60}?)(?:: ?(.*))?$", re.MULTILINE
+)
+
 
 def extract_members(transcript: str, max_members: int = 40) -> list[str]:
     """Return distinct group members, most active first, from the full transcript."""
@@ -79,6 +87,56 @@ def extract_members(transcript: str, max_members: int = 40) -> list[str]:
         counts[name] = counts.get(name, 0) + 1
     ranked = sorted(counts, key=lambda n: (-counts[n], n))
     return ranked[:max_members]
+
+
+def count_messages(transcript: str) -> tuple[int, list[tuple[str, int]]]:
+    """Count distinct messages and per-member totals from the full transcript.
+
+    The transcript is assembled from overlapping scroll captures, so a single
+    message can be recorded several times. We deduplicate on (time, sender, text)
+    so the totals reflect real messages, not scrape artifacts. Boundary lines with
+    no message text ("… by NAME" with no colon) are skipped. "You" is the bot's own
+    account and is reported separately from member rankings by the caller.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    counts: dict[str, int] = {}
+    total = 0
+    for match in _MESSAGE_PATTERN.finditer(transcript):
+        stamp = match.group(1) or ""
+        name = " ".join(match.group(2).split()).strip()
+        text = (match.group(3) or "").strip()
+        if not name or not text:
+            continue
+        key = (stamp, name, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        counts[name] = counts.get(name, 0) + 1
+        total += 1
+    ranking = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return total, ranking
+
+
+def format_stats(transcript: str, bot_name: str) -> str:
+    """Human-friendly message-count summary and per-member ranking for the group."""
+    total, ranking = count_messages(transcript)
+    if total == 0:
+        return "Ekhono kono message count korte parini—history load hocche, ektu pore abar cheshta koro."
+    lines = [f"📊 Group e mot {total} ta message hoyeche (shuru theke ekhon porjonto)."]
+    lines.append("Ranking (ke koyta pathiyeche):")
+    rank = 0
+    for name, count in ranking:
+        # The bot's own "You" account is not a group member; note it at the end instead.
+        if name.casefold() == "you":
+            continue
+        rank += 1
+        share = count * 100 / total
+        lines.append(f"{rank}. {name} — {count} ({share:.0f}%)")
+    me = next((c for n, c in ranking if n.casefold() == "you"), 0)
+    if me:
+        lines.append(f"(Ami nije {me} ta reply diyechi.)")
+    lines.append("Note: purono message gulo jotota load kora geche tar upor base kore hisheb.")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -289,6 +347,11 @@ class MessengerBot:
         request = parse_request(recent)
         if request.kind == RequestKind.HELP:
             await self._send_text(page, help_text())
+            return
+        if request.kind == RequestKind.CALCULATE:
+            # Deterministic local computation over the full transcript—no model call,
+            # so it answers immediately and for free.
+            await self._send_text(page, format_stats(self.transcript, self.settings.bot_name))
             return
         if request.kind == RequestKind.CHAT:
             answer = await self._answer_mention(context)

@@ -14,6 +14,7 @@ class RequestKind(str, Enum):
     EDIT = "edit"
     SING = "sing"
     HELP = "help"
+    CALCULATE = "calculate"
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,12 @@ class RoutedRequest:
 # a DOTALL ".*" would swallow all of it into the argument — which the media
 # generator then dutifully reads aloud or sings. Stopping at the newline keeps
 # only what the user actually typed after the command.
-COMMAND_PATTERN = re.compile(r"/(image|voice|edit|sing|help)\b[ \t]*([^\n\r]*)", re.IGNORECASE)
+COMMAND_PATTERN = re.compile(
+    r"/(image|voice|edit|sing|help|calculate|stats)\b[ \t]*([^\n\r]*)", re.IGNORECASE
+)
+
+# "/stats" is a friendly alias for "/calculate"; both map to the same handler.
+_COMMAND_ALIASES = {"stats": "calculate"}
 
 
 def normalize_text(text: str) -> str:
@@ -49,13 +55,15 @@ def parse_request(message_text: str) -> RoutedRequest:
         return RoutedRequest(RequestKind.CHAT, "")
 
     command, argument = match.groups()
-    return RoutedRequest(RequestKind(command.casefold()), normalize_text(argument))
+    command = _COMMAND_ALIASES.get(command.casefold(), command.casefold())
+    return RoutedRequest(RequestKind(command), normalize_text(argument))
 
 
 def help_text() -> str:
     return (
         "Commands: /image <description>, /voice <text>, /sing <brief or lyrics>, "
-        "and /edit <instruction> with an image attached in the same message. "
+        "/edit <instruction> with an image attached in the same message, and "
+        "/calculate for the group message count and per-member ranking. "
         "For all other questions, just mention me."
     )
 
