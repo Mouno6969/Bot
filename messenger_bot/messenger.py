@@ -62,6 +62,76 @@ _SCROLL_BOTTOM_JS = """
 }
 """
 
+# --- Native "Reply" threading -------------------------------------------------------
+# Detection is text-only, so to reply to the specific triggering message we must
+# re-locate it in the DOM by its text at send-time. A message is a role="button" whose
+# accessible name is "Enter, Message sent HH:MM by NAME: text"; its real bubble is the
+# closest role="article" (the tiny button rect is just an inner icon). We tag that
+# article, physically hover its centre — Messenger only reveals the hover action
+# toolbar for a REAL pointer move, not a synthetic event or a forced .hover() — then
+# click the article-scoped "Reply" control so we thread to the correct message.
+_TAG_REPLY_TARGET_JS = r"""
+(anchor) => {
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const needle = norm(anchor);
+  if (!needle) return null;
+  document.querySelectorAll('[data-reply-target]').forEach(e => e.removeAttribute('data-reply-target'));
+  const btns = Array.from(document.querySelectorAll('[role="button"][aria-label*="Message sent"]'));
+  // Newest match = the trigger; scan from the end.
+  const target = btns.reverse().find(b => norm(b.getAttribute('aria-label')).includes(needle));
+  if (!target) return null;
+  const article = target.closest('[role="article"]') || target.parentElement;
+  if (!article) return null;
+  article.setAttribute('data-reply-target', '1');
+  article.scrollIntoView({block: 'center'});
+  return true;
+}
+"""
+_REPLY_TARGET_RECT_JS = r"""
+() => {
+  const a = document.querySelector('[data-reply-target]');
+  if (!a) return null;
+  const r = a.getBoundingClientRect();
+  return {x: r.left, y: r.top, w: r.width, h: r.height};
+}
+"""
+# Click the reply control INSIDE the tagged article only, so we never grab a different
+# message's leftover hover toolbar. Prefer the direct button; else open "More actions".
+_CLICK_REPLY_IN_ARTICLE_JS = r"""
+() => {
+  const art = document.querySelector('[data-reply-target]');
+  if (!art) return {path: 'no-article'};
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const direct = Array.from(art.querySelectorAll('[role="button"][aria-label="Reply to this message"]')).find(visible);
+  if (direct) { direct.click(); return {path: 'direct'}; }
+  const more = Array.from(art.querySelectorAll('[role="button"][aria-label="More actions"]')).find(visible);
+  if (more) { more.click(); return {path: 'opened-more'}; }
+  return {path: 'no-control'};
+}
+"""
+_CLICK_REPLY_MENUITEM_JS = r"""
+() => {
+  const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+  const reply = items.find(m => {
+    const t = (m.getAttribute('aria-label') || m.innerText || '').trim().toLowerCase();
+    return t === 'reply' || t.startsWith('reply');
+  });
+  if (reply) { reply.click(); return true; }
+  return false;
+}
+"""
+# The composer shows a "Replying to <name>" preview once reply mode is armed; its
+# presence is our success signal.
+_REPLYING_PREVIEW_JS = r"""
+() => {
+  for (const el of document.querySelectorAll('h3, span, div')) {
+    const t = (el.innerText || '').trim();
+    if (/^Replying to /i.test(t) && t.length < 160) return t.split('\n')[0];
+  }
+  return null;
+}
+"""
+
 # Messenger's accessibility scrape labels every message with its author as
 # "… Message sent HH:MM by NAME: text". Extracting NAME from the WHOLE transcript
 # (not just the recent context window) lets the bot always know the full roster of
@@ -346,20 +416,24 @@ class MessengerBot:
 
     async def _handle_request(self, page: Page, context: str, recent: str) -> None:
         request = parse_request(recent)
+        # Anchor every response — the immediate acknowledgement AND the eventual media —
+        # to the specific message that triggered it, so replies stay threaded even when
+        # other messages arrive during a multi-minute media job. "" -> plain send.
+        reply_to = self._reply_anchor(recent)
         if request.kind == RequestKind.HELP:
-            await self._send_text(page, help_text())
+            await self._send_text(page, help_text(), reply_to=reply_to)
             return
         if request.kind == RequestKind.CALCULATE:
             # Deterministic local computation over the full transcript—no model call,
             # so it answers immediately and for free.
-            await self._send_text(page, format_stats(self.transcript, self.settings.bot_name))
+            await self._send_text(page, format_stats(self.transcript, self.settings.bot_name), reply_to=reply_to)
             return
         if request.kind == RequestKind.CHAT:
             answer = await self._answer_mention(context)
-            await self._send_text(page, answer)
+            await self._send_text(page, answer, reply_to=reply_to)
             return
         if not request.argument:
-            await self._send_text(page, missing_argument_text(request.kind))
+            await self._send_text(page, missing_argument_text(request.kind), reply_to=reply_to)
             return
 
         if request.kind in (RequestKind.VIDEO, RequestKind.MUSICVIDEO):
@@ -374,18 +448,19 @@ class MessengerBot:
                 page,
                 f"Prompt ta niye idea + scene + {note} banachhi, tarpor video render korbo—"
                 "koyek minute lagbe, wait koro.",
+                reply_to=reply_to,
             )
             try:
                 plan = await self._plan_video(request.argument, is_music)
                 print(f"Video plan: mood={plan.mood}, {len(plan.scenes)} scene(s), idea={plan.idea[:80]!r}")
                 asset = await self.media.generate_video(plan, audio_kind)
-                await self._send_media(page, asset)
+                await self._send_media(page, asset, reply_to=reply_to)
                 self.state.last_reply = f"{request.kind.value} delivered"
                 self.state.save(self.settings.state_file)
                 print(f"Delivered {request.kind.value}: {asset.filename}")
             except MediaError as error:
                 print(f"Video job failed: {error}")
-                await self._send_text(page, f"Sorry, video ta banate parlam na. {error}")
+                await self._send_text(page, f"Sorry, video ta banate parlam na. {error}", reply_to=reply_to)
             return
 
         if request.kind == RequestKind.EDIT:
@@ -394,6 +469,7 @@ class MessengerBot:
                 await self._send_text(
                     page,
                     "For /edit, attach one image in the same message and write the edit instruction after /edit.",
+                    reply_to=reply_to,
                 )
                 return
         else:
@@ -405,17 +481,19 @@ class MessengerBot:
             RequestKind.SING: "Original song ta banachhi—ektu wait koro.",
             RequestKind.EDIT: "Image ta edit korchhi—ektu wait koro.",
         }[request.kind]
-        await self._send_text(page, acknowledgement)
+        await self._send_text(page, acknowledgement, reply_to=reply_to)
 
         try:
             asset = await self.media.generate(request.kind, request.argument, source_image)
-            await self._send_media(page, asset)
+            await self._send_media(page, asset, reply_to=reply_to)
             self.state.last_reply = acknowledgement
             self.state.save(self.settings.state_file)
             print(f"Delivered {request.kind.value}: {asset.filename}")
         except MediaError as error:
             print(f"Media job failed: {error}")
-            await self._send_text(page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}")
+            await self._send_text(
+                page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}", reply_to=reply_to
+            )
 
     async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
         """Turn a raw /video prompt into a structured creative plan via the LLM.
@@ -471,10 +549,91 @@ The "Group members" list above is the complete roster of who is in this group, d
             print(f"Manus reply error: {error}")
             return "দুঃখিত, এখন উত্তরটা তৈরি করতে পারছি না। একটু পরে আবার mention দাও।"
 
-    async def _send_text(self, page: Page, text: str) -> None:
+    @staticmethod
+    def _reply_anchor(recent: str) -> str:
+        """Return a distinctive text slice of the message that triggered this response.
+
+        Detection is text-only, so this text is the only handle we have to re-locate the
+        triggering message in the DOM at send-time. The newest ``_MESSAGE_PATTERN`` match
+        in ``recent`` is the trigger; its group(3) is the raw message text WITHOUT the
+        "Message sent … by NAME:" accessibility wrapper — which is exactly what the DOM
+        bubble displays, so a contains-match on it will find the right message. Falls back
+        to the last non-empty line (wrapper stripped) if the pattern does not match.
+        Returns "" when nothing usable is found, so the caller skips reply mode entirely.
+        """
+        matches = list(_MESSAGE_PATTERN.finditer(recent or ""))
+        text = ""
+        for match in reversed(matches):
+            candidate = " ".join((match.group(3) or "").split()).strip()
+            if candidate:
+                text = candidate
+                break
+        if not text:
+            for line in reversed((recent or "").splitlines()):
+                stripped = re.sub(
+                    r"^.*?Message sent\s*(?:\d{1,2}:\d{2})?\s*by [^:\n]{1,60}?:\s*", "", line
+                )
+                stripped = " ".join(stripped.split()).strip()
+                if stripped:
+                    text = stripped
+                    break
+        # A distinctive-but-short slice: long enough to be unique, short enough that a
+        # contains-match survives Messenger truncating/wrapping long bubbles.
+        return text[:80]
+
+    async def _enter_reply_mode(self, page: Page, anchor: str) -> bool:
+        """Arm Messenger's native Reply on the message whose text contains ``anchor``.
+
+        Returns True only once the composer's "Replying to …" preview is confirmed, so a
+        True result guarantees the next send threads to that message. Never raises: any
+        failure (message scrolled out / virtualized, hover toolbar absent, DOM changed)
+        returns False and the caller falls back to a plain send. Nothing is ever dropped.
+        """
+        if not anchor:
+            return False
+        try:
+            if not await page.evaluate(_TAG_REPLY_TARGET_JS, anchor):
+                return False
+            await asyncio.sleep(0.6)  # let the scroll-into-view settle before hovering
+            for _ in range(4):
+                rect = await page.evaluate(_REPLY_TARGET_RECT_JS)
+                if not rect or rect["w"] <= 0 or rect["h"] <= 0:
+                    return False
+                # A real physical pointer move is required — Messenger ignores synthetic
+                # mouse events and Playwright's forced .hover() for revealing the toolbar.
+                cx = rect["x"] + rect["w"] / 2
+                cy = rect["y"] + rect["h"] / 2
+                await page.mouse.move(cx - 30, cy)
+                await page.mouse.move(cx, cy)
+                await asyncio.sleep(0.6)
+                result = await page.evaluate(_CLICK_REPLY_IN_ARTICLE_JS)
+                path = result.get("path")
+                if path == "direct":
+                    break
+                if path == "opened-more":
+                    await asyncio.sleep(0.8)
+                    if await page.evaluate(_CLICK_REPLY_MENUITEM_JS):
+                        break
+                    return False
+            else:
+                return False
+            await asyncio.sleep(1.0)
+            preview = await page.evaluate(_REPLYING_PREVIEW_JS)
+            if preview:
+                print(f"Reply mode armed: {preview}")
+                return True
+            return False
+        except Exception as error:  # noqa: BLE001 — reply is best-effort; never break the send
+            print(f"Could not enter reply mode (falling back to plain send): {error}")
+            return False
+
+    async def _send_text(self, page: Page, text: str, reply_to: str | None = None) -> None:
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
+                if reply_to:
+                    # Best-effort: thread to the triggering message. False -> plain send.
+                    await self._enter_reply_mode(page, reply_to)
                 input_box = await self._composer(page)
                 await input_box.click(timeout=15_000)
                 await input_box.fill(text, timeout=15_000)
@@ -515,9 +674,13 @@ The "Group members" list above is the complete roster of who is in this group, d
         except Exception as error:
             print(f"Chat recovery navigation failed: {error}")
 
-    async def _send_media(self, page: Page, asset: MediaAsset) -> None:
+    async def _send_media(self, page: Page, asset: MediaAsset, reply_to: str | None = None) -> None:
         file_inputs = page.locator("input[type='file']")
         try:
+            if reply_to:
+                # Best-effort: thread the media to the triggering message. Arm reply mode
+                # BEFORE attaching — Messenger keeps it armed until the message is sent.
+                await self._enter_reply_mode(page, reply_to)
             if await file_inputs.count():
                 await file_inputs.last.set_input_files(str(asset.local_path))
             else:
