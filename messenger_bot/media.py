@@ -237,17 +237,26 @@ class ManusMediaClient:
             )
         if kind == RequestKind.VOICE:
             return (
-                "Generate exactly one natural text-to-speech audio file. "
-                "Before the colon below are delivery instructions in English; after the colon is the exact script to speak. "
-                "Choose Bengali (Bangladesh), Banglish, English, or mixed pronunciation to match the script. "
-                f"Speak warmly, clearly, and conversationally at a natural pace: {instruction}\n\n{shared}"
+                "Produce exactly one text-to-speech audio file that speaks ONLY the script delimited by the <script> "
+                "tags below. Read the words between the tags verbatim and nothing else: do NOT read these instructions, "
+                "the word 'script', the tags themselves, or any quotation marks aloud, and do not add greetings, "
+                "commentary, or narration of your own. "
+                "Auto-detect the script's language — Bengali (Bangladesh), Banglish, English, or a mix — and use natural, "
+                "native pronunciation with correct sentence intonation. "
+                "Delivery: a single warm, clear, human voice at a natural conversational pace.\n"
+                f"<script>\n{instruction}\n</script>\n\n{shared}"
             )
         if kind == RequestKind.SING:
             return (
-                f"Create exactly one original song audio file based on: {instruction}\n\n"
+                f"Compose and fully produce exactly one original song as a finished audio file based on: {instruction}\n\n"
+                "The output MUST be real music: a sung vocal melody performed over actual musical instruments — a full "
+                "instrumental backing track and arrangement mixed together into one track. It must NOT be spoken word, a "
+                "plain voiceover, a cappella singing with no backing, or a bare beat with no melody. "
+                "Include clearly audible instrumentation (for example drums or percussion, bass, and at least one melodic "
+                "instrument such as guitar, piano, or synth) under a memorable sung melody. "
                 "Keep the track under 90 seconds unless the request specifies a shorter duration. "
                 "Use original lyrics and do not imitate a living artist or reproduce copyrighted song lyrics. "
-                "Describe the genre, tempo, mood, instruments, vocals, and song structure internally before generating. "
+                "Decide the genre, tempo, key, mood, instrumentation, and song structure yourself before generating. "
                 f"{shared}"
             )
         if kind == RequestKind.EDIT:
