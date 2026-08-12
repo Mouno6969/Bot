@@ -28,6 +28,40 @@ class RouterTests(unittest.TestCase):
         result = parse_request("@Shahidulla who has communicated most clearly?")
         self.assertEqual(result.kind, RequestKind.CHAT)
 
+    def test_argument_stops_at_end_of_command_line(self):
+        # Messenger's accessibility scrape appends UI chrome after the message.
+        # The argument must be only what the user typed on the command line,
+        # never the trailing "Compose / Chat members / Privacy & support" junk.
+        scrape = (
+            "@Shahidulla Kaysar /voice sobai ke shubho sokal janai\n"
+            "Compose\n"
+            "Write to BGC (Body)\n"
+            "Chat Info\n"
+            "Customise chat\n"
+            "Chat members\n"
+            "Media, files and links\n"
+            "Privacy & support\n"
+        )
+        result = parse_request(scrape)
+        self.assertEqual(result.kind, RequestKind.VOICE)
+        self.assertEqual(result.argument, "sobai ke shubho sokal janai")
+
+    def test_image_argument_also_bounded_to_line(self):
+        scrape = "@Shahidulla /image a rainy Dhaka street\nCompose\nChat members\nPrivacy & support"
+        result = parse_request(scrape)
+        self.assertEqual(result.kind, RequestKind.IMAGE)
+        self.assertEqual(result.argument, "a rainy Dhaka street")
+
+    def test_sing_argument_bounded_and_after_sender_prefix(self):
+        scrape = (
+            "Enter, Message sent 03:45 by Mouno (bideshi Kamla): "
+            "@Shahidulla Kaysar /sing ekta friendship gaan bol\n"
+            "Compose\nChat members\n"
+        )
+        result = parse_request(scrape)
+        self.assertEqual(result.kind, RequestKind.SING)
+        self.assertEqual(result.argument, "ekta friendship gaan bol")
+
 
 if __name__ == "__main__":
     unittest.main()

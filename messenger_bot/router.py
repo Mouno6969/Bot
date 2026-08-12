@@ -22,7 +22,13 @@ class RoutedRequest:
     argument: str
 
 
-COMMAND_PATTERN = re.compile(r"/(image|voice|edit|sing|help)\b\s*(.*)", re.IGNORECASE | re.DOTALL)
+# The command argument is bounded to the SAME line as the command. Messenger's
+# accessibility scrape appends UI chrome (timestamps, sender names, "Compose",
+# "Chat members", "Privacy & support", …) on the lines that follow a message, so
+# a DOTALL ".*" would swallow all of it into the argument — which the media
+# generator then dutifully reads aloud or sings. Stopping at the newline keeps
+# only what the user actually typed after the command.
+COMMAND_PATTERN = re.compile(r"/(image|voice|edit|sing|help)\b[ \t]*([^\n\r]*)", re.IGNORECASE)
 
 
 def normalize_text(text: str) -> str:
