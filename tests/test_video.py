@@ -170,6 +170,36 @@ class GenerateVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["n"], 3)  # the retried scene recovered
         self.assertEqual(attempts["scene two"], 2)  # exactly one retry
 
+    async def test_a_scene_recovers_on_the_final_attempt(self):
+        # A scene that stalls _JOB_ATTEMPTS-1 times but delivers on the last attempt must
+        # still make it into the video — this is the flaky-recovering case seen live, where
+        # only two attempts weren't enough and the whole render was lost.
+        client = self._client()
+        attempts = {}
+        seen = {}
+
+        async def fake_generate(kind, instruction, source_image=None):
+            attempts[instruction] = attempts.get(instruction, 0) + 1
+            if (
+                kind == RequestKind.IMAGE
+                and instruction == "scene two"
+                and attempts[instruction] < client._JOB_ATTEMPTS
+            ):
+                raise MediaError("still stalling")
+            return MediaAsset(local_path=Path(f"/tmp/{instruction}.bin"), media_type=kind.value, filename="x")
+
+        client.generate = fake_generate  # type: ignore[assignment]
+        client._RETRY_BACKOFF_SECONDS = 0
+        client._compose_cinematic_video = lambda imgs, aud, mood: seen.update(n=len(imgs)) or MediaAsset(  # type: ignore[assignment]
+            Path("/tmp/o.mp4"), "video", "o.mp4"
+        )
+        result = await client.generate_video(
+            _plan(["scene one", "scene two", "scene three"]), RequestKind.VOICE
+        )
+        self.assertEqual(result.media_type, "video")
+        self.assertEqual(seen["n"], 3)  # nothing dropped
+        self.assertEqual(attempts["scene two"], client._JOB_ATTEMPTS)  # used every attempt
+
     async def test_concurrent_generations_are_capped(self):
         # No more than _MAX_CONCURRENT_JOBS generations may run at once, even with 3
         # scenes + audio queued — the free plan stalls when overloaded.

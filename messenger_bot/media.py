@@ -67,8 +67,8 @@ class ManusMediaClient:
         # plan: two concurrent tasks (one image + one audio) succeed reliably, but firing
         # all 3–4 at once makes most of them stall out ("creating the image now…" with no
         # attachment ever landing). So we cap concurrency to _MAX_CONCURRENT_JOBS and give
-        # each job a retry — a stalled/500'd generation gets a second chance instead of
-        # sinking the whole video. We still tolerate partial image failures and compose
+        # each job several attempts — a stalled/500'd generation gets more chances instead
+        # of sinking the whole video. We still tolerate partial image failures and compose
         # from whatever images DID land; audio is the one hard requirement.
         semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_JOBS)
         image_jobs = [self._generate_guarded(semaphore, RequestKind.IMAGE, scene) for scene in plan.scenes]
@@ -97,15 +97,17 @@ class ManusMediaClient:
 
     # The free plan reliably handles two simultaneous generations; more than that and most
     # of them stall without ever delivering a file. Cap concurrency here and retry each job
-    # once so a single transient failure doesn't waste the whole render.
+    # a few times so a flaky-but-recovering API doesn't waste the whole render — observed
+    # live: audio recovered on its retry while all three images exhausted only two attempts,
+    # sinking a video that a third attempt would likely have saved.
     _MAX_CONCURRENT_JOBS = 2
-    _JOB_ATTEMPTS = 2
+    _JOB_ATTEMPTS = 3
     _RETRY_BACKOFF_SECONDS = 5.0
 
     async def _generate_guarded(
         self, semaphore: asyncio.Semaphore, kind: RequestKind, instruction: str
     ) -> MediaAsset:
-        """Run one generation under the concurrency cap, retrying once on failure."""
+        """Run one generation under the concurrency cap, retrying on failure up to _JOB_ATTEMPTS."""
         last_error: MediaError | None = None
         for attempt in range(1, self._JOB_ATTEMPTS + 1):
             async with semaphore:

@@ -132,6 +132,39 @@ _REPLYING_PREVIEW_JS = r"""
 }
 """
 
+# --- Media send confirmation --------------------------------------------------------
+# Attaching a file only stages a LOCAL preview in the composer; the message is not sent
+# until that staged attachment clears (Messenger removes the preview once it accepts the
+# send). A truly-staged attachment shows a VISIBLE, ENABLED "Remove attachment" /
+# "Upload another file" control. Messenger also keeps a permanently HIDDEN, DISABLED
+# "Delete" button in the DOM — the visibility/enabled gate below excludes it, so this
+# signal is a reliable, media-type-agnostic proof of staging and (once it flips back to
+# false) of delivery. Counting <video>/<img> tags is NOT reliable: the composer preview
+# renders one too, outside the conversation log.
+_MEDIA_STAGED_JS = r"""
+() => {
+  const usable = (el) => {
+    if (!el) return false;
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    if (el.getAttribute('aria-disabled') === 'true') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  const sels = ['[aria-label="Remove attachment"]', '[aria-label="Upload another file"]'];
+  for (const s of sels) {
+    for (const el of document.querySelectorAll(s)) { if (usable(el)) return true; }
+  }
+  return false;
+}
+"""
+# Timeouts/attempts for the attach -> send -> confirm cycle (seconds). Generous because a
+# large video can take a while to stage/upload; module-level so tests can shrink them.
+_MEDIA_STAGE_TIMEOUT_S = 45.0
+_MEDIA_CONFIRM_TIMEOUT_S = 90.0
+_MEDIA_CLEAR_TIMEOUT_S = 10.0
+_MEDIA_SETTLE_S = 1.0
+_MEDIA_SEND_ATTEMPTS = 3
+
 # Messenger's accessibility scrape labels every message with its author as
 # "… Message sent HH:MM by NAME: text". Extracting NAME from the WHOLE transcript
 # (not just the recent context window) lets the bot always know the full roster of
@@ -675,25 +708,92 @@ The "Group members" list above is the complete roster of who is in this group, d
             print(f"Chat recovery navigation failed: {error}")
 
     async def _send_media(self, page: Page, asset: MediaAsset, reply_to: str | None = None) -> None:
+        """Attach and send a generated media file, CONFIRMING it actually posted.
+
+        Attaching only stages a local preview in the composer; the send is not complete
+        until that staged attachment clears (Messenger removes it once it accepts the
+        message). The old implementation just slept 3s and pressed Enter without focusing
+        the composer or checking anything, so it could silently fail — the file sat as an
+        unsent draft while this method reported success. Now each attempt: attaches, waits
+        for the attachment to stage, focuses the composer (Enter is ignored unless the
+        composer is focused), presses Enter, then confirms the staged attachment CLEARS —
+        a media-type-agnostic proof of delivery (works for image/voice/song/video, unlike
+        counting <video> tags, which also match the composer preview). Retries the whole
+        cycle and raises MediaError only if delivery is never confirmed.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, _MEDIA_SEND_ATTEMPTS + 1):
+            try:
+                if reply_to:
+                    # Best-effort: thread the media to the triggering message. Arm reply
+                    # mode BEFORE attaching — Messenger keeps it armed until send.
+                    await self._enter_reply_mode(page, reply_to)
+                # Never stack onto a draft left staged by a previous failed attempt.
+                if await page.evaluate(_MEDIA_STAGED_JS):
+                    await self._clear_staged_media(page)
+                await self._attach_media_file(page, asset)
+                if not await self._wait_for(page, _MEDIA_STAGED_JS, True, _MEDIA_STAGE_TIMEOUT_S):
+                    raise MediaError("the attachment never staged in the composer")
+                await asyncio.sleep(_MEDIA_SETTLE_S)  # let the staged preview settle before sending
+                composer = await self._composer(page)
+                await composer.click(timeout=15_000)  # focus — Enter is a no-op otherwise
+                await asyncio.sleep(0.3)
+                await composer.press("Enter", timeout=15_000)
+                if await self._wait_for(page, _MEDIA_STAGED_JS, False, _MEDIA_CONFIRM_TIMEOUT_S):
+                    print(f"Media sent and confirmed delivered: {asset.filename}")
+                    return
+                last_error = MediaError("attachment stayed staged after Enter — not sent")
+                print(f"Media send attempt {attempt} not confirmed: {last_error}")
+            except MediaError as error:
+                last_error = error
+                print(f"Media send attempt {attempt} failed: {error}")
+            except Exception as error:  # noqa: BLE001 — normalize to MediaError below
+                last_error = error
+                print(f"Media send attempt {attempt} errored: {error}")
+            await self._clear_staged_media(page)  # tidy the composer before retrying
+        raise MediaError(f"The media was generated but Messenger could not post it: {last_error}")
+
+    async def _attach_media_file(self, page: Page, asset: MediaAsset) -> None:
+        """Attach the asset via the hidden file input, or the file chooser as a fallback."""
         file_inputs = page.locator("input[type='file']")
+        if await file_inputs.count():
+            await file_inputs.last.set_input_files(str(asset.local_path))
+            return
+        attach_button = page.locator("[aria-label='Attach a file'], [aria-label*='Attach']").first
+        async with page.expect_file_chooser() as chooser_info:
+            await attach_button.click()
+        chooser = await chooser_info.value
+        await chooser.set_files(str(asset.local_path))
+
+    async def _clear_staged_media(self, page: Page) -> None:
+        """Best-effort: remove any attachment still staged in the composer (for retries)."""
         try:
-            if reply_to:
-                # Best-effort: thread the media to the triggering message. Arm reply mode
-                # BEFORE attaching — Messenger keeps it armed until the message is sent.
-                await self._enter_reply_mode(page, reply_to)
-            if await file_inputs.count():
-                await file_inputs.last.set_input_files(str(asset.local_path))
-            else:
-                attach_button = page.locator("[aria-label='Attach a file'], [aria-label*='Attach']").first
-                async with page.expect_file_chooser() as chooser_info:
-                    await attach_button.click()
-                chooser = await chooser_info.value
-                await chooser.set_files(str(asset.local_path))
-            await asyncio.sleep(3)
-            composer = await self._composer(page)
-            await composer.press("Enter", timeout=15_000)
-        except Exception as error:
-            raise MediaError(f"The media was generated but Messenger could not upload it: {error}") from error
+            if not await page.evaluate(_MEDIA_STAGED_JS):
+                return
+            remove = page.locator('[aria-label="Remove attachment"]')
+            deadline = time.monotonic() + _MEDIA_CLEAR_TIMEOUT_S
+            while time.monotonic() < deadline and await page.evaluate(_MEDIA_STAGED_JS):
+                if await remove.count():
+                    try:
+                        await remove.first.click(timeout=3_000)
+                    except Exception:  # noqa: BLE001
+                        break
+                await asyncio.sleep(0.5)
+        except Exception as error:  # noqa: BLE001 — clearing is best-effort
+            print(f"Could not clear staged media before retry: {error}")
+
+    async def _wait_for(self, page: Page, js: str, want: bool, timeout_s: float, poll: float = 1.0) -> bool:
+        """Poll ``page.evaluate(js)`` until its truthiness equals ``want`` or time runs out."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                if bool(await page.evaluate(js)) == want:
+                    return True
+            except Exception:  # noqa: BLE001 — transient DOM errors: keep polling
+                pass
+            await asyncio.sleep(poll)
+        return False
+
 
     async def _download_recent_chat_image(self, page: Page) -> Path | None:
         """Download the most recent large non-avatar Messenger image to use as `/edit` input."""

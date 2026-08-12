@@ -9,7 +9,10 @@ and a failure to arm still sends (fallback — a response is never dropped).
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
+from messenger_bot import messenger
+from messenger_bot.media import MediaError
 from messenger_bot.messenger import MessengerBot
 
 
@@ -47,15 +50,21 @@ class FakeLocator:
 
     async def click(self, **kwargs):
         self._page.events.append(f"{self._name}.click")
+        if self._name == "remove" and self._page.clears_ok:
+            self._page.attached = False
 
     async def fill(self, text, **kwargs):
         self._page.events.append(f"{self._name}.fill:{text[:20]}")
 
     async def press(self, key, **kwargs):
         self._page.events.append(f"{self._name}.press:{key}")
+        if key == "Enter" and self._page.sends_ok:
+            self._page.sent = True
 
     async def set_input_files(self, path, **kwargs):
         self._page.events.append(f"{self._name}.set_files")
+        if self._page.stages_ok:
+            self._page.attached = True
 
 
 class FakeMouse:
@@ -67,21 +76,39 @@ class FakeMouse:
 
 
 class FakePage:
-    """Records the reply/compose interaction. ``arm_ok`` decides whether reply mode
-    successfully arms (i.e. whether the 'Replying to …' preview appears)."""
+    """Records the reply/compose interaction.
 
-    def __init__(self, arm_ok=True, tag_found=True):
+    ``arm_ok`` decides whether reply mode arms (the 'Replying to …' preview appears).
+    For media: ``stages_ok`` — attaching stages the file; ``sends_ok`` — Enter sends it
+    (so the staged attachment clears); ``clears_ok`` — the Remove control can clear a
+    staged draft. ``attached``/``sent`` track composer state so the media-staged probe
+    (``_MEDIA_STAGED_JS``) reports staging (attached & !sent) and, after send, clearing.
+    """
+
+    def __init__(self, arm_ok=True, tag_found=True, stages_ok=True, sends_ok=True, clears_ok=True):
         self.arm_ok = arm_ok
         self.tag_found = tag_found
+        self.stages_ok = stages_ok
+        self.sends_ok = sends_ok
+        self.clears_ok = clears_ok
+        self.attached = False
+        self.sent = False
         self.events = []
         self.mouse = FakeMouse(self)
 
     def locator(self, selector):
-        name = "file" if "file" in selector else "composer"
+        if "Remove attachment" in selector:
+            name = "remove"
+        elif "file" in selector:
+            name = "file"
+        else:
+            name = "composer"
         return FakeLocator(self, name)
 
     async def evaluate(self, script, *args):
         # Dispatch purely on distinctive substrings of the module-level JS constants.
+        if "Remove attachment" in script and "usable" in script:  # media-staged probe
+            return self.attached and not self.sent
         if "data-reply-target" in script and "closest" in script:  # tag target
             self.events.append("tag")
             return True if self.tag_found else None
@@ -197,6 +224,47 @@ class SendThreadingTests(unittest.IsolatedAsyncioTestCase):
         await bot._send_media(page, asset, reply_to=None)
         self.assertNotIn("tag", page.events)
         self.assertIn("file.set_files", page.events)
+
+
+class MediaDeliveryConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    """_send_media must PROVE the attachment posted (the staged preview clears), not just
+    press Enter and assume success — the bug that let a video sit unsent as a draft."""
+
+    def _asset(self):
+        return SimpleNamespace(local_path=Path("/tmp/out.mp4"), filename="out.mp4")
+
+    async def test_confirms_delivery_by_focusing_then_sending(self):
+        bot, page = _bot(), FakePage()  # stages_ok/sends_ok default True
+        await bot._send_media(page, self._asset(), reply_to=None)
+        # Focus the composer (click) BEFORE pressing Enter, and the file was attached.
+        self.assertIn("file.set_files", page.events)
+        self.assertIn("composer.click", page.events)
+        self.assertIn("composer.press:Enter", page.events)
+        self.assertLess(page.events.index("composer.click"), page.events.index("composer.press:Enter"))
+        # Delivery confirmed => the staged attachment cleared (sent flipped true).
+        self.assertTrue(page.sent)
+
+    async def test_raises_when_attachment_never_stages(self):
+        bot, page = _bot(), FakePage(stages_ok=False)
+        with patch.object(messenger, "_MEDIA_STAGE_TIMEOUT_S", 1.0), \
+             patch.object(messenger, "_MEDIA_CLEAR_TIMEOUT_S", 1.0), \
+             patch.object(messenger, "_MEDIA_SETTLE_S", 0.0), \
+             patch.object(messenger, "_MEDIA_SEND_ATTEMPTS", 1):
+            with self.assertRaises(MediaError):
+                await bot._send_media(page, self._asset(), reply_to=None)
+
+    async def test_raises_when_attachment_never_clears(self):
+        # Enter does not send (sends_ok=False) and the draft cannot be cleared: every
+        # attempt must fail confirmation and the method must raise, not falsely succeed.
+        bot, page = _bot(), FakePage(sends_ok=False, clears_ok=False)
+        with patch.object(messenger, "_MEDIA_CONFIRM_TIMEOUT_S", 1.0), \
+             patch.object(messenger, "_MEDIA_CLEAR_TIMEOUT_S", 1.0), \
+             patch.object(messenger, "_MEDIA_SETTLE_S", 0.0), \
+             patch.object(messenger, "_MEDIA_SEND_ATTEMPTS", 2):
+            with self.assertRaises(MediaError):
+                await bot._send_media(page, self._asset(), reply_to=None)
+        # It retried rather than giving up after one press.
+        self.assertEqual(page.events.count("file.set_files"), 2)
 
 
 if __name__ == "__main__":
