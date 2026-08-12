@@ -64,8 +64,10 @@ def parse_request(message_text: str) -> RoutedRequest:
 
 def help_text() -> str:
     return (
-        "Commands: /image <description>, /video <prompt> (image + spoken voice), "
-        "/musicvideo <prompt> (image + original song), /voice <text>, /sing <brief or lyrics>, "
+        "Commands: /image <description>, "
+        "/video <prompt> (turns your idea into a short cinematic clip: scenes + spoken voiceover), "
+        "/musicvideo <prompt> (a short clip with scenes + an original song), "
+        "/voice <text>, /sing <brief or lyrics>, "
         "/edit <instruction> with an image attached in the same message, and "
         "/calculate for the group message count and per-member ranking. "
         "For all other questions, just mention me."

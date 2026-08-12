@@ -19,6 +19,7 @@ from .config import Settings
 from .media import ManusMediaClient, MediaAsset, MediaError
 from .meta_ai import MetaChatClient, MetaError
 from .router import RequestKind, RoutedRequest, has_mention, help_text, missing_argument_text, parse_request
+from .video_plan import VideoPlan, build_planner_prompt, parse_plan
 
 
 # Messenger virtualizes its message list: older messages only render after scrolling
@@ -362,13 +363,22 @@ class MessengerBot:
             return
 
         if request.kind in (RequestKind.VIDEO, RequestKind.MUSICVIDEO):
-            # Composed video: generate an image + audio from the one prompt, then mux
-            # locally. /video narrates with a spoken voice; /musicvideo uses a song.
-            audio_kind = RequestKind.SING if request.kind == RequestKind.MUSICVIDEO else RequestKind.VOICE
-            note = "gaan" if audio_kind == RequestKind.SING else "voice"
-            await self._send_text(page, f"Video ta banachhi (image + {note})—ektu somoy lagbe, wait koro.")
+            # Creative video: an LLM turns the prompt into an idea + 2-3 scene image
+            # prompts + an extended voiceover/song script + a mood; we generate those
+            # parts and stitch them into a moving, graded MP4 locally. /video narrates
+            # with a spoken voice; /musicvideo uses an original song.
+            is_music = request.kind == RequestKind.MUSICVIDEO
+            audio_kind = RequestKind.SING if is_music else RequestKind.VOICE
+            note = "gaan" if is_music else "voiceover"
+            await self._send_text(
+                page,
+                f"Prompt ta niye idea + scene + {note} banachhi, tarpor video render korbo—"
+                "koyek minute lagbe, wait koro.",
+            )
             try:
-                asset = await self.media.generate_video(request.argument, audio_kind)
+                plan = await self._plan_video(request.argument, is_music)
+                print(f"Video plan: mood={plan.mood}, {len(plan.scenes)} scene(s), idea={plan.idea[:80]!r}")
+                asset = await self.media.generate_video(plan, audio_kind)
                 await self._send_media(page, asset)
                 self.state.last_reply = f"{request.kind.value} delivered"
                 self.state.save(self.settings.state_file)
@@ -406,6 +416,27 @@ class MessengerBot:
         except MediaError as error:
             print(f"Media job failed: {error}")
             await self._send_text(page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}")
+
+    async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
+        """Turn a raw /video prompt into a structured creative plan via the LLM.
+
+        Uses the same Meta-primary / Manus-fallback path as plain mentions. parse_plan
+        always returns a valid plan, so even if both models fail we fall back to a plan
+        built from the user's own prompt rather than aborting the video.
+        """
+        planner_prompt = build_planner_prompt(prompt, is_music)
+        raw = ""
+        if self.meta.enabled:
+            try:
+                raw = (await self.meta.reply(planner_prompt)).strip()
+            except MetaError as error:
+                print(f"Meta AI planning error, falling back to Manus: {error}")
+        if not raw:
+            try:
+                raw = (await self.media.reply(planner_prompt)).strip()
+            except MediaError as error:
+                print(f"Manus planning error, using prompt-only fallback plan: {error}")
+        return parse_plan(raw, prompt, is_music)
 
     async def _answer_mention(self, context: str) -> str:
         members = extract_members(self.transcript)

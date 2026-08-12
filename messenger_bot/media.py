@@ -15,6 +15,7 @@ import requests
 
 from .config import Settings
 from .router import RequestKind
+from .video_plan import VideoPlan
 
 
 class MediaError(RuntimeError):
@@ -47,27 +48,192 @@ class ManusMediaClient:
         task_id = await asyncio.to_thread(self._create_task, kind, user_instruction, file_id)
         return await self._wait_for_asset(task_id, kind)
 
-    async def generate_video(self, prompt: str, audio_kind: RequestKind) -> MediaAsset:
-        """Compose a video locally from a generated image plus a generated audio track.
+    async def generate_video(self, plan: VideoPlan, audio_kind: RequestKind) -> MediaAsset:
+        """Compose a cinematic video locally from a creative plan.
 
         Manus native video is quota-limited to a couple of clips a day on the free plan,
-        so instead we generate the two cheap-and-plentiful parts — an image and either a
-        spoken voice (audio_kind=VOICE) or an original song (audio_kind=SING) — from the
-        SAME prompt, then mux them into an MP4 with ffmpeg. The two generations run
-        concurrently; the mux is a fast local step.
+        so instead we generate the plan's cheap-and-plentiful parts — one image per scene
+        and either a spoken voiceover (audio_kind=VOICE) or an original song
+        (audio_kind=SING) built from the plan's script — then stitch them into an MP4 with
+        ffmpeg: Ken Burns motion on each scene, cross-fades between scenes, a mood-based
+        color grade, vignette, and fade in/out. All generations run concurrently; the mux
+        is a local step. If the cinematic render fails, we fall back to a simple still mux
+        so the user still gets a video rather than an error.
         """
         if audio_kind not in {RequestKind.VOICE, RequestKind.SING}:
             raise MediaError(f"A composed video's audio must be voice or song, not {audio_kind.value}.")
-        image_asset, audio_asset = await asyncio.gather(
-            self.generate(RequestKind.IMAGE, prompt),
-            self.generate(audio_kind, prompt),
-        )
-        return await asyncio.to_thread(
-            self._compose_video, image_asset.local_path, audio_asset.local_path
+
+        # Generate every scene image plus the audio track. Observed behaviour on the free
+        # plan: two concurrent tasks (one image + one audio) succeed reliably, but firing
+        # all 3–4 at once makes most of them stall out ("creating the image now…" with no
+        # attachment ever landing). So we cap concurrency to _MAX_CONCURRENT_JOBS and give
+        # each job a retry — a stalled/500'd generation gets a second chance instead of
+        # sinking the whole video. We still tolerate partial image failures and compose
+        # from whatever images DID land; audio is the one hard requirement.
+        semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_JOBS)
+        image_jobs = [self._generate_guarded(semaphore, RequestKind.IMAGE, scene) for scene in plan.scenes]
+        audio_job = self._generate_guarded(semaphore, audio_kind, plan.script)
+        *image_results, audio_result = await asyncio.gather(
+            *image_jobs, audio_job, return_exceptions=True
         )
 
+        if isinstance(audio_result, BaseException):
+            raise MediaError(f"Could not generate the video's audio: {audio_result}")
+
+        image_paths = []
+        for index, result in enumerate(image_results):
+            if isinstance(result, BaseException):
+                print(f"Scene {index + 1} image failed (continuing with the rest): {result}")
+            else:
+                image_paths.append(result.local_path)
+
+        if not image_paths:
+            raise MediaError(f"Could not generate any scene images for the video: {image_results[0]}")
+        print(f"Composing video from {len(image_paths)}/{len(plan.scenes)} scene image(s).")
+
+        return await asyncio.to_thread(
+            self._compose_cinematic_video, image_paths, audio_result.local_path, plan.mood
+        )
+
+    # The free plan reliably handles two simultaneous generations; more than that and most
+    # of them stall without ever delivering a file. Cap concurrency here and retry each job
+    # once so a single transient failure doesn't waste the whole render.
+    _MAX_CONCURRENT_JOBS = 2
+    _JOB_ATTEMPTS = 2
+    _RETRY_BACKOFF_SECONDS = 5.0
+
+    async def _generate_guarded(
+        self, semaphore: asyncio.Semaphore, kind: RequestKind, instruction: str
+    ) -> MediaAsset:
+        """Run one generation under the concurrency cap, retrying once on failure."""
+        last_error: MediaError | None = None
+        for attempt in range(1, self._JOB_ATTEMPTS + 1):
+            async with semaphore:
+                try:
+                    return await self.generate(kind, instruction)
+                except MediaError as error:
+                    last_error = error
+                    print(
+                        f"{kind.value} generation attempt {attempt}/{self._JOB_ATTEMPTS} "
+                        f"failed: {error}"
+                    )
+            if attempt < self._JOB_ATTEMPTS:
+                await asyncio.sleep(self._RETRY_BACKOFF_SECONDS)
+        raise last_error if last_error else MediaError(f"{kind.value} generation failed")
+
+    # Mood → concrete ffmpeg parameters. The LLM only picks the label; every number
+    # here is code-controlled, so model output can never reach the command line.
+    _MOOD_EFFECTS = {
+        "calm": {"zoom_speed": 0.0008, "max_zoom": 1.15, "crossfade": 1.5, "contrast": 1.03, "saturation": 1.05, "transition": "fade"},
+        "cinematic": {"zoom_speed": 0.0015, "max_zoom": 1.3, "crossfade": 1.0, "contrast": 1.1, "saturation": 1.15, "transition": "fade"},
+        "energetic": {"zoom_speed": 0.0028, "max_zoom": 1.45, "crossfade": 0.6, "contrast": 1.15, "saturation": 1.3, "transition": "fadeblack"},
+    }
+    _FPS = 24
+    _WIDTH = 1280
+    _HEIGHT = 720
+
+    def _compose_cinematic_video(self, image_paths: list[Path], audio_path: Path, mood: str) -> MediaAsset:
+        """Stitch scene images into a moving, graded MP4 synced to the audio's length."""
+        effects = self._MOOD_EFFECTS.get(mood, self._MOOD_EFFECTS["cinematic"])
+        duration = self._probe_duration(audio_path)
+        n = len(image_paths)
+
+        # Crossfade length must stay well under a single scene's screen time; clamp it so
+        # short audio never produces a negative xfade offset.
+        scene_len = duration / n if n else duration
+        crossfade = min(effects["crossfade"], scene_len * 0.5)
+        # With N scenes overlapping by `crossfade`, total = n*clip - (n-1)*xf. Solve for the
+        # per-clip length that makes the montage exactly as long as the audio.
+        clip_len = (duration + (n - 1) * crossfade) / n
+        clip_frames = max(2, round(clip_len * self._FPS))
+
+        output_path = self.settings.output_dir / f"{int(time.time())}_{self._safe_filename('cinematic_video', 'video')}"
+        command = self._build_cinematic_command(image_paths, audio_path, output_path, effects, duration, clip_frames, crossfade)
+
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=300)
+        except (subprocess.SubprocessError, OSError) as error:
+            print(f"Cinematic compose crashed ({error}); falling back to simple mux.")
+            return self._compose_video(image_paths[0], audio_path)
+        if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+            detail = result.stderr.decode("utf-8", "ignore").strip()[:300]
+            print(f"Cinematic compose failed ({detail or 'ffmpeg error'}); falling back to simple mux.")
+            return self._compose_video(image_paths[0], audio_path)
+        return MediaAsset(local_path=output_path, media_type="video", filename=output_path.name)
+
+    def _build_cinematic_command(
+        self,
+        image_paths: list[Path],
+        audio_path: Path,
+        output_path: Path,
+        effects: dict[str, Any],
+        duration: float,
+        clip_frames: int,
+        crossfade: float,
+    ) -> list[str]:
+        """Build the ffmpeg argv for the Ken Burns + crossfade + grade filtergraph."""
+        command = ["ffmpeg", "-y", "-loglevel", "error"]
+        for path in image_paths:
+            command += ["-i", str(path)]
+        command += ["-i", str(audio_path)]
+
+        zoom = f"z='min(zoom+{effects['zoom_speed']},{effects['max_zoom']})'"
+        # Each still is upscaled for zoom headroom, cropped to a fixed frame, then Ken-Burns
+        # zoomed to a uniform size/fps so the scenes can be cross-faded together.
+        ken_burns = (
+            f"scale={self._WIDTH * 2}:{self._HEIGHT * 2}:force_original_aspect_ratio=increase,"
+            f"crop={self._WIDTH * 2}:{self._HEIGHT * 2},"
+            f"zoompan={zoom}:d={clip_frames}:s={self._WIDTH}x{self._HEIGHT}:fps={self._FPS},setsar=1"
+        )
+        parts = [f"[{i}:v]{ken_burns}[v{i}]" for i in range(len(image_paths))]
+
+        # Chain cross-fades: each transition starts `crossfade` before the running clip ends.
+        scene_seconds = clip_frames / self._FPS
+        last_label = "v0"
+        for i in range(1, len(image_paths)):
+            offset = i * (scene_seconds - crossfade)
+            out_label = f"x{i}"
+            parts.append(
+                f"[{last_label}][v{i}]xfade=transition={effects['transition']}:"
+                f"duration={crossfade:.3f}:offset={offset:.3f}[{out_label}]"
+            )
+            last_label = out_label
+
+        fade_out_start = max(0.0, duration - 0.5)
+        parts.append(
+            f"[{last_label}]eq=contrast={effects['contrast']}:saturation={effects['saturation']},"
+            f"vignette,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out_start:.3f}:d=0.5[vout]"
+        )
+
+        audio_index = len(image_paths)
+        command += [
+            "-filter_complex", ";".join(parts),
+            "-map", "[vout]", "-map", f"{audio_index}:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path),
+        ]
+        return command
+
+    @staticmethod
+    def _probe_duration(audio_path: Path) -> float:
+        """Return the audio length in seconds (ffprobe), with a safe fallback."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+                capture_output=True, timeout=30,
+            )
+            value = float(result.stdout.decode("utf-8", "ignore").strip())
+            if value > 0:
+                return value
+        except (subprocess.SubprocessError, OSError, ValueError):
+            pass
+        return 12.0  # a reasonable default montage length if probing fails
+
     def _compose_video(self, image_path: Path, audio_path: Path) -> MediaAsset:
-        """Loop a still image for the audio's duration and mux into one H.264/AAC MP4."""
+        """Fallback: loop one still image for the audio's duration and mux to H.264/AAC."""
         filename = self._safe_filename(f"{Path(image_path).stem}_video", "video")
         output_path = self.settings.output_dir / f"{int(time.time())}_{filename}"
         command = [
@@ -196,13 +362,32 @@ class ManusMediaClient:
         # to compose music; edit uploads a source image and re-renders it) hit this
         # race, and the old code broke on the same cycle the status flipped — losing
         # the file and reporting "finished without a usable attachment". Keep polling
-        # for a short grace window after the first "stopped" so the trailing file lands.
+        # for a grace window after the first "stopped" so the trailing file lands.
+        #
+        # Manus job times are highly variable (the same prompt has taken 64s and 244s
+        # in back-to-back runs) and after "stopped" the generator often keeps posting
+        # progress messages ("I'm preparing the single audio attachment now") before
+        # the file appears. So (1) treat any NEW assistant content as fresh activity
+        # and reset the grace timer — if it's still talking it's still working — and
+        # (2) keep a generous 90s backstop for the trailing commit itself.
         stopped_since: float | None = None
-        grace_seconds = 30
+        grace_seconds = 90
+        previous_message = ""
+        last_poll_error: str | None = None
 
         while time.monotonic() < deadline:
             await asyncio.sleep(4)
-            data = await asyncio.to_thread(self._list_messages, task_id)
+            try:
+                data = await asyncio.to_thread(self._list_messages, task_id)
+            except (requests.RequestException, MediaError) as error:
+                # A single transient API hiccup (e.g. an intermittent HTTP 500 on
+                # listMessages) must not kill a multi-minute job — especially a video,
+                # which polls several generations at once. Log it and keep polling until
+                # the deadline instead of aborting on the first blip.
+                last_poll_error = str(error)
+                print(f"Transient poll error for {kind.value} (still waiting): {error}")
+                continue
+
             for message in data.get("messages", []):
                 if message.get("type") != "assistant_message":
                     continue
@@ -222,6 +407,13 @@ class ManusMediaClient:
             if self._is_quota_message(latest_message):
                 raise MediaError(self._quota_reason(kind))
 
+            # New content since the last poll means the job is still actively working,
+            # even if the status already reads "stopped" — don't let the grace run out
+            # underneath a job that's still producing progress.
+            if latest_message != previous_message:
+                previous_message = latest_message
+                stopped_since = None
+
             if self._latest_status(data) == "stopped":
                 now = time.monotonic()
                 if stopped_since is None:
@@ -232,6 +424,8 @@ class ManusMediaClient:
                 stopped_since = None
 
         hint = f" Generator said: {latest_message}" if latest_message else ""
+        if last_poll_error and not latest_message:
+            hint = f" Last error: {last_poll_error}"
         raise MediaError(f"The {kind.value} job finished without a usable attachment.{hint}")
 
     @staticmethod
