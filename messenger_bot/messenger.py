@@ -18,7 +18,15 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 from .config import Settings
 from .media import ManusMediaClient, MediaAsset, MediaError
 from .meta_ai import MetaChatClient, MetaError
-from .router import RequestKind, RoutedRequest, has_mention, help_text, missing_argument_text, parse_request
+from .router import (
+    RequestKind,
+    RoutedRequest,
+    has_mention,
+    help_text,
+    is_facebook_url,
+    missing_argument_text,
+    parse_request,
+)
 from .video_plan import VideoPlan, build_planner_prompt, parse_plan
 
 
@@ -469,6 +477,32 @@ class MessengerBot:
             await self._send_text(page, missing_argument_text(request.kind), reply_to=reply_to)
             return
 
+        if request.kind == RequestKind.LINK:
+            if not is_facebook_url(request.argument):
+                await self._send_text(
+                    page,
+                    "Please send a valid HTTPS Facebook account link, for example: "
+                    "https://www.facebook.com/username",
+                    reply_to=reply_to,
+                )
+                return
+            try:
+                visited_url = await self._visit_facebook_link(page, request.argument)
+            except Exception as error:  # noqa: BLE001 — report navigation failures to the chat
+                print(f"Facebook link visit failed: {error}")
+                await self._send_text(
+                    page,
+                    "Facebook link ta open korte parini. Link ta check kore abar try koro.",
+                    reply_to=reply_to,
+                )
+                return
+            await self._send_text(
+                page,
+                f"Facebook account link ta visit korechi: {visited_url}",
+                reply_to=reply_to,
+            )
+            return
+
         if request.kind in (RequestKind.VIDEO, RequestKind.MUSICVIDEO):
             # Creative video: an LLM turns the prompt into an idea + 2-3 scene image
             # prompts + an extended voiceover/song script + a mood; we generate those
@@ -527,6 +561,20 @@ class MessengerBot:
             await self._send_text(
                 page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}", reply_to=reply_to
             )
+
+    async def _visit_facebook_link(self, page: Page, url: str) -> str:
+        """Open a Facebook URL in a short-lived tab, preserving the group monitor page."""
+        tab = await page.context.new_page()
+        try:
+            response = await tab.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            if not is_facebook_url(tab.url):
+                raise ValueError("Facebook URL redirected outside the Facebook domain")
+            await asyncio.sleep(3)
+            if response is not None and response.status >= 400:
+                raise RuntimeError(f"Facebook returned HTTP {response.status}")
+            return tab.url
+        finally:
+            await tab.close()
 
     async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
         """Turn a raw /video prompt into a structured creative plan via the LLM.

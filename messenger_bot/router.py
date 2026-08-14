@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import re
+from urllib.parse import urlparse
 
 
 class RequestKind(str, Enum):
@@ -17,6 +18,7 @@ class RequestKind(str, Enum):
     CALCULATE = "calculate"
     VIDEO = "video"
     MUSICVIDEO = "musicvideo"
+    LINK = "link"
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,7 @@ class RoutedRequest:
 # generator then dutifully reads aloud or sings. Stopping at the newline keeps
 # only what the user actually typed after the command.
 COMMAND_PATTERN = re.compile(
-    r"/(image|voice|edit|sing|help|calculate|stats|musicvideo|video)\b[ \t]*([^\n\r]*)",
+    r"/(image|voice|edit|sing|help|calculate|stats|musicvideo|video|link)\b[ \t]*([^\n\r]*)",
     re.IGNORECASE,
 )
 
@@ -67,7 +69,7 @@ def help_text() -> str:
         "Commands: /image <description>, "
         "/video <prompt> (turns your idea into a short cinematic clip: scenes + spoken voiceover), "
         "/musicvideo <prompt> (a short clip with scenes + an original song), "
-        "/voice <text>, /sing <brief or lyrics>, "
+        "/voice <text>, /sing <brief or lyrics>, /link <Facebook account URL>, "
         "/edit <instruction> with an image attached in the same message, and "
         "/calculate for the group message count and per-member ranking. "
         "For all other questions, just mention me."
@@ -82,5 +84,19 @@ def missing_argument_text(kind: RequestKind) -> str:
         RequestKind.VOICE: "@Shahidulla /voice আজকে সবাই কেমন আছো?",
         RequestKind.SING: "@Shahidulla /sing a 45-second upbeat Banglish friendship song",
         RequestKind.EDIT: "attach an image and write: @Shahidulla /edit make it a watercolor portrait",
+        RequestKind.LINK: "@Shahidulla /link https://www.facebook.com/username",
     }
     return f"Please add details. Example: {examples[kind]}"
+
+
+def is_facebook_url(value: str) -> bool:
+    """Return whether value is a safe HTTPS URL hosted on Facebook."""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    return (
+        parsed.scheme.casefold() == "https"
+        and (hostname == "facebook.com" or hostname.endswith(".facebook.com"))
+    )

@@ -1,6 +1,6 @@
 import unittest
 
-from messenger_bot.router import RequestKind, has_mention, parse_request
+from messenger_bot.router import RequestKind, has_mention, is_facebook_url, parse_request
 
 
 class RouterTests(unittest.TestCase):
@@ -23,6 +23,16 @@ class RouterTests(unittest.TestCase):
 
         result = parse_request("@Shahidulla /edit make it watercolor")
         self.assertEqual(result.kind, RequestKind.EDIT)
+
+    def test_link_command_and_facebook_url_validation(self):
+        result = parse_request("@Shahidulla /link https://www.facebook.com/example.user")
+        self.assertEqual(result.kind, RequestKind.LINK)
+        self.assertEqual(result.argument, "https://www.facebook.com/example.user")
+        self.assertTrue(is_facebook_url(result.argument))
+        self.assertTrue(is_facebook_url("https://m.facebook.com/profile.php?id=123"))
+        self.assertFalse(is_facebook_url("http://www.facebook.com/example.user"))
+        self.assertFalse(is_facebook_url("https://example.com/redirect"))
+        self.assertFalse(is_facebook_url("javascript:alert(1)"))
 
     def test_normal_mention_remains_chat(self):
         result = parse_request("@Shahidulla who has communicated most clearly?")
