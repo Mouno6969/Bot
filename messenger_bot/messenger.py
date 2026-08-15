@@ -362,6 +362,7 @@ class BotState:
     last_reply: str = ""
     pending_link_url: str = ""
     pending_link_path: tuple[int, ...] = ()
+    pending_link_quantity: int = 0
 
     @classmethod
     def load(cls, path: Path) -> "BotState":
@@ -372,6 +373,7 @@ class BotState:
                 raw.get("last_reply", ""),
                 raw.get("pending_link_url", ""),
                 tuple(raw.get("pending_link_path", [])),
+                int(raw.get("pending_link_quantity", 0)),
             )
         except (FileNotFoundError, OSError, ValueError, TypeError):
             return cls()
@@ -384,6 +386,7 @@ class BotState:
                     "last_reply": self.last_reply,
                     "pending_link_url": self.pending_link_url,
                     "pending_link_path": list(self.pending_link_path),
+                    "pending_link_quantity": self.pending_link_quantity,
                 },
                 ensure_ascii=False,
             ),
@@ -587,24 +590,35 @@ class MessengerBot:
                 return
             pending_url = self.state.pending_link_url
             pending_path = self.state.pending_link_path
+            remaining = self.state.pending_link_quantity or 1
+            completed = 0
             try:
-                result = await self._visit_facebook_link(
-                    page,
-                    pending_url,
-                    pending_path,
-                    submit_requested=True,
-                    confirm_submit=True,
-                )
+                for attempt in range(1, remaining + 1):
+                    result = await self._visit_facebook_link(
+                        page,
+                        pending_url,
+                        pending_path,
+                        submit_requested=True,
+                        confirm_submit=True,
+                    )
+                    completed += 1
+                    self.state.pending_link_quantity = remaining - completed
+                    self.state.save(self.settings.state_file)
             except Exception as error:  # noqa: BLE001 — report navigation failures to the chat
-                print(f"Facebook submission failed: {error}")
-                await self._send_text(page, "Facebook submit korte parini; kono report submit hoyni.", reply_to=reply_to)
+                print(f"Facebook submission {completed + 1}/{remaining} failed: {error}")
+                await self._send_text(
+                    page,
+                    f"Facebook submit {completed + 1}/{remaining} korte parini; baki quantity pending ache.",
+                    reply_to=reply_to,
+                )
                 return
             self.state.pending_link_url = ""
             self.state.pending_link_path = ()
+            self.state.pending_link_quantity = 0
             self.state.save(self.settings.state_file)
             await self._send_text(
                 page,
-                f"Facebook submission complete korechi: option path {'.'.join(map(str, result.option_path))}.",
+                f"Facebook submission {completed} ta complete korechi: option path {'.'.join(map(str, result.option_path))}.",
                 reply_to=reply_to,
             )
             return
@@ -635,9 +649,10 @@ class MessengerBot:
                     reply_to=reply_to,
                 )
                 return
-            link_url, option_path, submit_requested = selection
+            link_url, option_path, submit_requested, quantity = selection
             self.state.pending_link_url = ""
             self.state.pending_link_path = ()
+            self.state.pending_link_quantity = 0
             try:
                 result = await self._visit_facebook_link(
                     page,
@@ -657,17 +672,18 @@ class MessengerBot:
             if result.status == "awaiting_confirmation":
                 self.state.pending_link_url = link_url
                 self.state.pending_link_path = option_path
+                self.state.pending_link_quantity = quantity
                 self.state.save(self.settings.state_file)
                 await self._send_text(
                     page,
                     "Submit button ready. Final action confirm korte `@Shahidulla /link confirm` pathao; "
-                    f"option path {'.'.join(map(str, option_path))} submit hobe.",
+                    f"option path {'.'.join(map(str, option_path))} quantity {quantity} submit hobe.",
                     reply_to=reply_to,
                 )
             elif result.status == "submitted":
                 await self._send_text(
                     page,
-                    f"Facebook submission complete korechi: option path {'.'.join(map(str, option_path))}.",
+                    f"Facebook submission complete korechi: option path {'.'.join(map(str, option_path))}, quantity {quantity}.",
                     reply_to=reply_to,
                 )
             else:

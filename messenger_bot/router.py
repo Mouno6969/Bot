@@ -69,7 +69,7 @@ def help_text() -> str:
         "Commands: /image <description>, "
         "/video <prompt> (turns your idea into a short cinematic clip: scenes + spoken voiceover), "
         "/musicvideo <prompt> (a short clip with scenes + an original song), "
-        "/voice <text>, /sing <brief or lyrics>, /link <Facebook account URL>, "
+        "/voice <text>, /sing <brief or lyrics>, /link <Facebook URL> <option path> [quantity <number>] [submit], "
         "/edit <instruction> with an image attached in the same message, and "
         "/calculate for the group message count and per-member ranking. "
         "For all other questions, just mention me."
@@ -84,17 +84,21 @@ def missing_argument_text(kind: RequestKind) -> str:
         RequestKind.VOICE: "@Shahidulla /voice আজকে সবাই কেমন আছো?",
         RequestKind.SING: "@Shahidulla /sing a 45-second upbeat Banglish friendship song",
         RequestKind.EDIT: "attach an image and write: @Shahidulla /edit make it a watercolor portrait",
-        RequestKind.LINK: "@Shahidulla /link https://www.facebook.com/username",
+        RequestKind.LINK: "@Shahidulla /link https://www.facebook.com/username 2 4 quantity 3 submit",
     }
     return f"Please add details. Example: {examples[kind]}"
 
 
-def parse_link_selection(value: str) -> tuple[str, tuple[int, ...], bool] | None:
-    """Return a URL, positional path, and explicit submit flag.
+
+
+def parse_link_selection(value: str) -> tuple[str, tuple[int, ...], bool, int] | None:
+    """Return a URL, positional path, submit flag, and repeat quantity.
 
     Supported forms are ``<url>`` followed by zero or more numeric choices,
-    optionally ending in the exact word ``submit``. Every choice must be
-    between 1 and 10. A missing path defaults to ``(1,)``.
+    optionally followed by ``quantity <number>`` and optionally ending in the
+    exact word ``submit``. Every option choice must be between 1 and 10;
+    quantity must be a positive integer. A missing path defaults to ``(1,)``
+    and a missing quantity defaults to ``1``.
     """
     parts = normalize_text(value).split()
     if not parts:
@@ -102,6 +106,18 @@ def parse_link_selection(value: str) -> tuple[str, tuple[int, ...], bool] | None
     submit = parts[-1].casefold() == "submit"
     if submit:
         parts.pop()
+
+    quantity = 1
+    if len(parts) >= 2 and parts[-2].casefold() == "quantity":
+        if not parts[-1].isdigit():
+            return None
+        quantity = int(parts[-1])
+        parts = parts[:-2]
+    elif any(part.casefold() == "quantity" for part in parts[1:]):
+        return None
+    if quantity < 1:
+        return None
+
     numeric = parts[1:]
     if not numeric or not all(token.isdigit() for token in numeric):
         if numeric:
@@ -109,7 +125,7 @@ def parse_link_selection(value: str) -> tuple[str, tuple[int, ...], bool] | None
     numbers = tuple(int(token) for token in numeric)
     if any(not 1 <= number <= 10 for number in numbers):
         return None
-    return parts[0], numbers or (1,), submit
+    return parts[0], numbers or (1,), submit, quantity
 
 
 def is_facebook_url(value: str) -> bool:

@@ -8,6 +8,7 @@ The bot responds to commands only when the message also contains a mention of **
 | `/voice <text>` | `@Shahidulla /voice স্বাগতম বন্ধুরা, আজকে আমরা আড্ডা দিবো।` | Creates a natural Bengali, Banglish, or English voice note from the supplied script. |
 | `/sing <brief or lyrics>` | `@Shahidulla /sing upbeat Banglish friendship song, 45 seconds` | Creates one original song or instrumental track. The bot treats `/sing` as an original-music request; it does not imitate particular artists or reproduce copyrighted lyrics. |
 | `/edit <instruction>` | `@Shahidulla /edit make the attached photo look like a watercolor portrait` | Edits the most recently attached image in the same message. If no usable image is attached, the bot replies with the exact format to use. |
+| `/link <Facebook URL> <option path> [quantity <number>] [submit]` | `@Shahidulla /link https://www.facebook.com/username 2 4 1 quantity 3 submit` | Follows the existing option path. `quantity 3` repeats the same flow three times after confirmation. The final `submit` remains explicit, and `/link confirm` executes the pending quantity. |
 | Mention + normal request | `@Shahidulla Who has used English most clearly in this chat?` | Replies in the language of the request and bases conclusions only on observable recent chat context. |
 
 > **Image-editing format:** attach the image and include the mention and `/edit` instruction in the same Messenger message. The bot preserves non-requested visual details unless the instruction says otherwise.
@@ -16,4 +17,4 @@ The bot responds to commands only when the message also contains a mention of **
 
 ## Reliability rules
 
-The bot processes each incoming message once using a message fingerprint, never treats its own sent messages as prompts, queues one media job at a time, and times out cleanly rather than blocking mention-based replies indefinitely. It does not claim a comparative judgment is supported when the visible chat context is insufficient.
+The bot processes each incoming message once using a message fingerprint, never treats its own sent messages as prompts, queues one media job at a time, and times out cleanly rather than blocking mention-based replies indefinitely. Link quantity accepts any positive integer, and repeated link submissions run sequentially. Option-path numbers remain limited to 1–10. It does not claim a comparative judgment is supported when the visible chat context is insufficient.

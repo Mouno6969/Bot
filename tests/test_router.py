@@ -45,19 +45,32 @@ class RouterTests(unittest.TestCase):
         for option_number in range(1, 11):
             self.assertEqual(
                 parse_link_selection(f"{url} {option_number}"),
-                (url, (option_number,), False),
+                (url, (option_number,), False, 1),
             )
-        self.assertEqual(parse_link_selection(url), (url, (1,), False))
-        self.assertEqual(parse_link_selection(f"{url} 2 4 1 submit"), (url, (2, 4, 1), True))
+        self.assertEqual(parse_link_selection(url), (url, (1,), False, 1))
+        self.assertEqual(parse_link_selection(f"{url} 2 4 1 submit"), (url, (2, 4, 1), True, 1))
         self.assertEqual(
             parse_link_selection(f"{url} 2 4 1"),
-            (url, (2, 4, 1), False),
+            (url, (2, 4, 1), False, 1),
+        )
+        self.assertEqual(
+            parse_link_selection(f"{url} 2 4 1 quantity 3 submit"),
+            (url, (2, 4, 1), True, 3),
+        )
+        self.assertEqual(
+            parse_link_selection(f"{url} 2 quantity 4"),
+            (url, (2,), False, 4),
         )
         self.assertIsNone(parse_link_selection(f"{url} 0"))
         self.assertIsNone(parse_link_selection(f"{url} 2 11"))
         self.assertIsNone(parse_link_selection(f"{url} 2 4 0"))
         self.assertIsNone(parse_link_selection(f"{url} 2 ten"))
         self.assertIsNone(parse_link_selection(f"{url} submit 2"))
+        self.assertIsNone(parse_link_selection(f"{url} 2 quantity"))
+        self.assertEqual(parse_link_selection(f"{url} 2 quantity 11"), (url, (2,), False, 11))
+        self.assertEqual(parse_link_selection(f"{url} 2 quantity 1000"), (url, (2,), False, 1000))
+        self.assertIsNone(parse_link_selection(f"{url} 2 quantity 0"))
+        self.assertIsNone(parse_link_selection(f"{url} 2 quantity 3 extra"))
 
     def test_normal_mention_remains_chat(self):
         result = parse_request("@Shahidulla who has communicated most clearly?")
