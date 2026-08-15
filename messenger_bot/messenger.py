@@ -25,6 +25,7 @@ from .router import (
     help_text,
     is_facebook_url,
     missing_argument_text,
+    parse_link_selection,
     parse_request,
 )
 from .video_plan import VideoPlan, build_planner_prompt, parse_plan
@@ -34,6 +35,103 @@ from .video_plan import VideoPlan, build_planner_prompt, parse_plan
 # up and are dropped again when scrolling down. These snippets find the conversation's
 # scroll container (the tallest scrollable element inside role="main") so the bot can
 # page upward and collect history into a persistent transcript.
+_FACEBOOK_TEXT_OPTION_SELECTOR = (
+    '[role="option"]:visible, '
+    '[role="button"]:visible, '
+    '[role="menuitem"]:visible, '
+    'div[tabindex="0"]:visible'
+)
+
+_CLICK_FACEBOOK_OPTION_JS = r"""
+({index, mode}) => {
+  const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const uniqueRows = (root) => {
+    const rows = Array.from(root.querySelectorAll('[role="menuitem"], [role="option"], [role="button"]'))
+      .filter(visible)
+      .map((el) => ({el, text: clean(el.innerText || el.textContent)}))
+      .filter(({text}) => text);
+    const seen = new Set();
+    return rows.filter(({el, text}) => {
+      const rect = el.getBoundingClientRect();
+      const key = `${text}|${Math.round(rect.x)}|${Math.round(rect.y)}|${Math.round(rect.width)}|${Math.round(rect.height)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const visibleContainers = (selector) => Array.from(document.querySelectorAll(selector)).filter(visible);
+  const clickFrom = (root, rows) => {
+    if (!rows || rows.length <= index) return {clicked: false, count: rows ? rows.length : 0, labels: rows ? rows.map(r => r.text) : []};
+    rows[index].el.click();
+    return {clicked: true, count: rows.length, labels: rows.map(r => r.text)};
+  };
+
+  if (mode === 'menu' || mode === 'active') {
+    const menus = visibleContainers('[role="menu"]');
+    if (menus.length) {
+      const menu = menus[menus.length - 1];
+      const result = clickFrom(menu, uniqueRows(menu));
+      if (result.clicked || mode === 'menu') return {...result, container: 'menu'};
+    }
+  }
+
+  if (mode === 'dialog' || mode === 'active') {
+    const dialogs = visibleContainers('[role="dialog"], [aria-modal="true"]');
+    if (dialogs.length) {
+      const dialog = dialogs[dialogs.length - 1];
+      const result = clickFrom(dialog, uniqueRows(dialog));
+      if (result.clicked || mode === 'dialog') return {...result, container: 'dialog'};
+    }
+
+    // Facebook's report sheet in the live UI has no dialog role. Find its
+    // visible question heading and walk upward to the smallest panel containing
+    // the plain-text button rows.
+    const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"],div,span'))
+      .filter(visible)
+      .filter((el) => {
+        const text = clean(el.innerText || el.textContent);
+        return /^(Why are you reporting|What kind of |How is it |Who is being )/i.test(text);
+      });
+    for (const heading of headings) {
+      let panel = heading;
+      while (panel && panel !== document.body) {
+        const rows = uniqueRows(panel);
+        if (rows.length >= 2) {
+          const result = clickFrom(panel, rows);
+          return {...result, container: 'report-sheet'};
+        }
+        panel = panel.parentElement;
+      }
+    }
+  }
+  return {clicked: false, count: 0, labels: []};
+}
+"""
+
+
+_CLICK_FACEBOOK_SUBMIT_JS = r"""
+(confirm) => {
+  const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+    .filter(visible)
+    .filter((el) => clean(el.innerText || el.textContent) === 'Submit' || clean(el.getAttribute('aria-label')) === 'Submit');
+  if (buttons.length !== 1) return {ready: false, count: buttons.length};
+  if (confirm) buttons[0].click();
+  return {ready: true, clicked: Boolean(confirm)};
+}
+"""
+
+
 _PICK_SCROLLER_JS = """
 () => {
   const main = document.querySelector('[role="main"]') || document.body;
@@ -252,21 +350,43 @@ def format_stats(transcript: str, bot_name: str) -> str:
 
 
 @dataclass
+class LinkVisitResult:
+    status: str
+    url: str
+    option_path: tuple[int, ...]
+
+
+@dataclass
 class BotState:
     processed: deque[str] = field(default_factory=lambda: deque(maxlen=80))
     last_reply: str = ""
+    pending_link_url: str = ""
+    pending_link_path: tuple[int, ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> "BotState":
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            return cls(deque(raw.get("processed", []), maxlen=80), raw.get("last_reply", ""))
+            return cls(
+                deque(raw.get("processed", []), maxlen=80),
+                raw.get("last_reply", ""),
+                raw.get("pending_link_url", ""),
+                tuple(raw.get("pending_link_path", [])),
+            )
         except (FileNotFoundError, OSError, ValueError, TypeError):
             return cls()
 
     def save(self, path: Path) -> None:
         path.write_text(
-            json.dumps({"processed": list(self.processed), "last_reply": self.last_reply}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "processed": list(self.processed),
+                    "last_reply": self.last_reply,
+                    "pending_link_url": self.pending_link_url,
+                    "pending_link_path": list(self.pending_link_path),
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
 
@@ -461,6 +581,33 @@ class MessengerBot:
         # to the specific message that triggered it, so replies stay threaded even when
         # other messages arrive during a multi-minute media job. "" -> plain send.
         reply_to = self._reply_anchor(recent)
+        if request.kind == RequestKind.LINK and request.argument.casefold() == "confirm":
+            if not self.state.pending_link_url or not self.state.pending_link_path:
+                await self._send_text(page, "No pending Facebook submission confirm korte parini.", reply_to=reply_to)
+                return
+            pending_url = self.state.pending_link_url
+            pending_path = self.state.pending_link_path
+            try:
+                result = await self._visit_facebook_link(
+                    page,
+                    pending_url,
+                    pending_path,
+                    submit_requested=True,
+                    confirm_submit=True,
+                )
+            except Exception as error:  # noqa: BLE001 — report navigation failures to the chat
+                print(f"Facebook submission failed: {error}")
+                await self._send_text(page, "Facebook submit korte parini; kono report submit hoyni.", reply_to=reply_to)
+                return
+            self.state.pending_link_url = ""
+            self.state.pending_link_path = ()
+            self.state.save(self.settings.state_file)
+            await self._send_text(
+                page,
+                f"Facebook submission complete korechi: option path {'.'.join(map(str, result.option_path))}.",
+                reply_to=reply_to,
+            )
+            return
         if request.kind == RequestKind.HELP:
             await self._send_text(page, help_text(), reply_to=reply_to)
             return
@@ -478,16 +625,27 @@ class MessengerBot:
             return
 
         if request.kind == RequestKind.LINK:
-            if not is_facebook_url(request.argument):
+            selection = parse_link_selection(request.argument)
+            if selection is None or not is_facebook_url(selection[0]):
                 await self._send_text(
                     page,
-                    "Please send a valid HTTPS Facebook account link, for example: "
-                    "https://www.facebook.com/username",
+                    "Please send a valid HTTPS Facebook account link followed by "
+                    "one or more option numbers from 1 to 10, for example: "
+                    "https://www.facebook.com/username 2 4 1",
                     reply_to=reply_to,
                 )
                 return
+            link_url, option_path, submit_requested = selection
+            self.state.pending_link_url = ""
+            self.state.pending_link_path = ()
             try:
-                visited_url = await self._visit_facebook_link(page, request.argument)
+                result = await self._visit_facebook_link(
+                    page,
+                    link_url,
+                    option_path,
+                    submit_requested=submit_requested,
+                    confirm_submit=False,
+                )
             except Exception as error:  # noqa: BLE001 — report navigation failures to the chat
                 print(f"Facebook link visit failed: {error}")
                 await self._send_text(
@@ -496,11 +654,28 @@ class MessengerBot:
                     reply_to=reply_to,
                 )
                 return
-            await self._send_text(
-                page,
-                f"Facebook account link ta visit korechi: {visited_url}",
-                reply_to=reply_to,
-            )
+            if result.status == "awaiting_confirmation":
+                self.state.pending_link_url = link_url
+                self.state.pending_link_path = option_path
+                self.state.save(self.settings.state_file)
+                await self._send_text(
+                    page,
+                    "Submit button ready. Final action confirm korte `@Shahidulla /link confirm` pathao; "
+                    f"option path {'.'.join(map(str, option_path))} submit hobe.",
+                    reply_to=reply_to,
+                )
+            elif result.status == "submitted":
+                await self._send_text(
+                    page,
+                    f"Facebook submission complete korechi: option path {'.'.join(map(str, option_path))}.",
+                    reply_to=reply_to,
+                )
+            else:
+                await self._send_text(
+                    page,
+                    f"Facebook account link ta visit korechi: {result.url}",
+                    reply_to=reply_to,
+                )
             return
 
         if request.kind in (RequestKind.VIDEO, RequestKind.MUSICVIDEO):
@@ -562,7 +737,15 @@ class MessengerBot:
                 page, f"Sorry, {request.kind.value} ta complete korte parlam na. {error}", reply_to=reply_to
             )
 
-    async def _visit_facebook_link(self, page: Page, url: str) -> str:
+    async def _visit_facebook_link(
+        self,
+        page: Page,
+        url: str,
+        option_path: tuple[int, ...] = (1,),
+        *,
+        submit_requested: bool = False,
+        confirm_submit: bool = False,
+    ) -> LinkVisitResult:
         """Open a Facebook profile, click its three-dot menu, then close the tab."""
         tab = await page.context.new_page()
         try:
@@ -572,13 +755,28 @@ class MessengerBot:
             await asyncio.sleep(3)
             if response is not None and response.status >= 400:
                 raise RuntimeError(f"Facebook returned HTTP {response.status}")
-            await self._click_facebook_more_menu(tab)
-            return tab.url
+            status = await self._click_facebook_more_menu(
+                tab,
+                option_path,
+                submit_requested=submit_requested,
+                confirm_submit=confirm_submit,
+            )
+            return LinkVisitResult(status, tab.url, option_path)
         finally:
             await tab.close()
 
-    async def _click_facebook_more_menu(self, tab: Page) -> None:
-        """Click Facebook's profile three-dot control across common UI label variants."""
+    async def _click_facebook_more_menu(
+        self,
+        tab: Page,
+        option_path: tuple[int, ...] = (1,),
+        *,
+        submit_requested: bool = False,
+        confirm_submit: bool = False,
+    ) -> str:
+        """Follow a variable-depth path through Facebook's scoped text sheets."""
+        if not option_path or any(not 1 <= number <= 10 for number in option_path):
+            raise ValueError("Facebook option path numbers must each be between 1 and 10")
+
         selectors = (
             '[role="button"][aria-label="More options"]',
             '[role="button"][aria-label="See options"]',
@@ -592,11 +790,109 @@ class MessengerBot:
             controls = tab.locator(selector)
             for index in range(await controls.count()):
                 control = controls.nth(index)
-                if await control.is_visible():
-                    await control.click(timeout=10_000)
-                    await asyncio.sleep(1)
-                    return
+                if not await control.is_visible():
+                    continue
+                await control.click(timeout=10_000)
+                await asyncio.sleep(1)
+
+                first = await tab.evaluate(
+                    _CLICK_FACEBOOK_OPTION_JS,
+                    {"index": 1, "mode": "menu"},
+                )
+                if not first.get("clicked"):
+                    raise RuntimeError(
+                        "Facebook profile menu did not expose a second scoped text option: "
+                        f"{first.get('labels', [])}"
+                    )
+                await asyncio.sleep(1)
+
+                report_prompt = await tab.evaluate(
+                    "() => document.body.innerText.includes('Why are you reporting this profile?')"
+                )
+                if report_prompt:
+                    for depth, number in enumerate(option_path):
+                        result = await tab.evaluate(
+                            _CLICK_FACEBOOK_OPTION_JS,
+                            {"index": number - 1, "mode": "dialog"},
+                        )
+                        if not result.get("clicked"):
+                            raise RuntimeError(
+                                f"Facebook nested option path failed at depth {depth + 1}: "
+                                f"{result.get('labels', [])}"
+                            )
+                        if depth < len(option_path) - 1:
+                            await asyncio.sleep(1)
+                    return await self._finish_facebook_submission(
+                        tab, option_path, submit_requested, confirm_submit
+                    )
+
+                # Legacy UI: select its first follow-up row, press Continue,
+                # then walk the requested path through any resulting sheets.
+                followup = await tab.evaluate(
+                    _CLICK_FACEBOOK_OPTION_JS,
+                    {"index": 0, "mode": "active"},
+                )
+                if not followup.get("clicked"):
+                    raise RuntimeError(
+                        "Facebook follow-up flow did not expose a first scoped text option: "
+                        f"{followup.get('labels', [])}"
+                    )
+                await asyncio.sleep(1)
+
+                continue_selectors = (
+                    '[role="button"][aria-label="Continue"]',
+                    '[role="button"]:has-text("Continue")',
+                    'button:has-text("Continue")',
+                )
+                clicked_continue = False
+                for continue_selector in continue_selectors:
+                    continue_controls = tab.locator(continue_selector)
+                    for continue_index in range(await continue_controls.count()):
+                        continue_control = continue_controls.nth(continue_index)
+                        if await continue_control.is_visible():
+                            await continue_control.click(timeout=10_000)
+                            clicked_continue = True
+                            break
+                    if clicked_continue:
+                        break
+                if not clicked_continue:
+                    raise RuntimeError("Facebook follow-up flow did not expose a visible Continue control")
+                await asyncio.sleep(1)
+
+                for depth, number in enumerate(option_path):
+                    result = await tab.evaluate(
+                        _CLICK_FACEBOOK_OPTION_JS,
+                        {"index": number - 1, "mode": "active"},
+                    )
+                    if not result.get("clicked"):
+                        raise RuntimeError(
+                            f"Facebook option path failed at depth {depth + 1}: "
+                            f"{result.get('labels', [])}"
+                        )
+                    if depth < len(option_path) - 1:
+                        await asyncio.sleep(1)
+                return await self._finish_facebook_submission(
+                    tab, option_path, submit_requested, confirm_submit
+                )
         raise RuntimeError("Facebook profile three-dot More options control was not found")
+
+    async def _finish_facebook_submission(
+        self,
+        tab: Page,
+        option_path: tuple[int, ...],
+        submit_requested: bool,
+        confirm_submit: bool,
+    ) -> str:
+        """Stop safely or click exactly one final Submit button after confirmation."""
+        if not submit_requested:
+            return "selected"
+        result = await tab.evaluate(_CLICK_FACEBOOK_SUBMIT_JS, confirm_submit)
+        if not result.get("ready"):
+            raise RuntimeError(
+                "Facebook final Submit control was not uniquely visible; "
+                f"found {result.get('count', 0)} matching controls for path {option_path}"
+            )
+        return "submitted" if result.get("clicked") else "awaiting_confirmation"
 
     async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
         """Turn a raw /video prompt into a structured creative plan via the LLM.

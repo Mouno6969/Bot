@@ -89,6 +89,29 @@ def missing_argument_text(kind: RequestKind) -> str:
     return f"Please add details. Example: {examples[kind]}"
 
 
+def parse_link_selection(value: str) -> tuple[str, tuple[int, ...], bool] | None:
+    """Return a URL, positional path, and explicit submit flag.
+
+    Supported forms are ``<url>`` followed by zero or more numeric choices,
+    optionally ending in the exact word ``submit``. Every choice must be
+    between 1 and 10. A missing path defaults to ``(1,)``.
+    """
+    parts = normalize_text(value).split()
+    if not parts:
+        return None
+    submit = parts[-1].casefold() == "submit"
+    if submit:
+        parts.pop()
+    numeric = parts[1:]
+    if not numeric or not all(token.isdigit() for token in numeric):
+        if numeric:
+            return None
+    numbers = tuple(int(token) for token in numeric)
+    if any(not 1 <= number <= 10 for number in numbers):
+        return None
+    return parts[0], numbers or (1,), submit
+
+
 def is_facebook_url(value: str) -> bool:
     """Return whether value is a safe HTTPS URL hosted on Facebook."""
     try:

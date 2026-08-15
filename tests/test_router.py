@@ -1,6 +1,12 @@
 import unittest
 
-from messenger_bot.router import RequestKind, has_mention, is_facebook_url, parse_request
+from messenger_bot.router import (
+    RequestKind,
+    has_mention,
+    is_facebook_url,
+    parse_link_selection,
+    parse_request,
+)
 
 
 class RouterTests(unittest.TestCase):
@@ -33,6 +39,25 @@ class RouterTests(unittest.TestCase):
         self.assertFalse(is_facebook_url("http://www.facebook.com/example.user"))
         self.assertFalse(is_facebook_url("https://example.com/redirect"))
         self.assertFalse(is_facebook_url("javascript:alert(1)"))
+
+    def test_link_option_paths_are_limited_to_one_through_ten(self):
+        url = "https://www.facebook.com/example.user"
+        for option_number in range(1, 11):
+            self.assertEqual(
+                parse_link_selection(f"{url} {option_number}"),
+                (url, (option_number,), False),
+            )
+        self.assertEqual(parse_link_selection(url), (url, (1,), False))
+        self.assertEqual(parse_link_selection(f"{url} 2 4 1 submit"), (url, (2, 4, 1), True))
+        self.assertEqual(
+            parse_link_selection(f"{url} 2 4 1"),
+            (url, (2, 4, 1), False),
+        )
+        self.assertIsNone(parse_link_selection(f"{url} 0"))
+        self.assertIsNone(parse_link_selection(f"{url} 2 11"))
+        self.assertIsNone(parse_link_selection(f"{url} 2 4 0"))
+        self.assertIsNone(parse_link_selection(f"{url} 2 ten"))
+        self.assertIsNone(parse_link_selection(f"{url} submit 2"))
 
     def test_normal_mention_remains_chat(self):
         result = parse_request("@Shahidulla who has communicated most clearly?")
