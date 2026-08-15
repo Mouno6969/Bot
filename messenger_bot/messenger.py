@@ -563,7 +563,7 @@ class MessengerBot:
             )
 
     async def _visit_facebook_link(self, page: Page, url: str) -> str:
-        """Open a Facebook URL in a short-lived tab, preserving the group monitor page."""
+        """Open a Facebook profile, click its three-dot menu, then close the tab."""
         tab = await page.context.new_page()
         try:
             response = await tab.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -572,9 +572,31 @@ class MessengerBot:
             await asyncio.sleep(3)
             if response is not None and response.status >= 400:
                 raise RuntimeError(f"Facebook returned HTTP {response.status}")
+            await self._click_facebook_more_menu(tab)
             return tab.url
         finally:
             await tab.close()
+
+    async def _click_facebook_more_menu(self, tab: Page) -> None:
+        """Click Facebook's profile three-dot control across common UI label variants."""
+        selectors = (
+            '[role="button"][aria-label="More options"]',
+            '[role="button"][aria-label="See options"]',
+            '[aria-label*="More options" i]',
+            '[aria-label*="See options" i]',
+            '[role="button"][aria-label*="More" i]',
+            '[role="button"][aria-label*="Options" i]',
+            '[role="button"][title*="More" i]',
+        )
+        for selector in selectors:
+            controls = tab.locator(selector)
+            for index in range(await controls.count()):
+                control = controls.nth(index)
+                if await control.is_visible():
+                    await control.click(timeout=10_000)
+                    await asyncio.sleep(1)
+                    return
+        raise RuntimeError("Facebook profile three-dot More options control was not found")
 
     async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
         """Turn a raw /video prompt into a structured creative plan via the LLM.
