@@ -113,6 +113,29 @@ _CLICK_FACEBOOK_OPTION_JS = r"""
 }
 """
 
+_CLICK_FACEBOOK_REPORT_PROFILE_JS = r"""
+() => {
+  const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const menus = Array.from(document.querySelectorAll('[role="menu"]')).filter(visible);
+  if (!menus.length) return {clicked: false, count: 0, labels: []};
+  const menu = menus[menus.length - 1];
+  const rows = Array.from(menu.querySelectorAll('[role="menuitem"], [role="option"], [role="button"]'))
+    .filter(visible)
+    .map((el) => ({el, text: clean(el.innerText || el.textContent || el.getAttribute('aria-label'))}))
+    .filter(({text}) => text);
+  const labels = rows.map(({text}) => text);
+  const matches = rows.filter(({text}) => /^report(?: this)? profile$/i.test(text));
+  if (matches.length !== 1) return {clicked: false, count: matches.length, labels};
+  matches[0].el.click();
+  return {clicked: true, count: 1, labels};
+}
+"""
+
 
 _CLICK_FACEBOOK_SUBMIT_JS = r"""
 (confirm) => {
@@ -811,14 +834,11 @@ class MessengerBot:
                 await control.click(timeout=10_000)
                 await asyncio.sleep(1)
 
-                first = await tab.evaluate(
-                    _CLICK_FACEBOOK_OPTION_JS,
-                    {"index": 1, "mode": "menu"},
-                )
-                if not first.get("clicked"):
+                report_entry = await tab.evaluate(_CLICK_FACEBOOK_REPORT_PROFILE_JS)
+                if not report_entry.get("clicked"):
                     raise RuntimeError(
-                        "Facebook profile menu did not expose a second scoped text option: "
-                        f"{first.get('labels', [])}"
+                        "Facebook profile menu did not expose exactly one Report profile option: "
+                        f"{report_entry.get('labels', [])}"
                     )
                 await asyncio.sleep(1)
 

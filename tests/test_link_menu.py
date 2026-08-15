@@ -25,10 +25,11 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, option_count=10, report_prompt=False, submit_count=1):
+    def __init__(self, option_count=10, report_prompt=False, submit_count=1, report_entry_count=1):
         self.option_count = option_count
         self.report_prompt = report_prompt
         self.submit_count = submit_count
+        self.report_entry_count = report_entry_count
         self.clicks = []
         self.selected_indexes = []
         self.option_requests = []
@@ -40,6 +41,13 @@ class FakePage:
         return FakeLocator(self, 'more-control')
 
     async def evaluate(self, script, arg=None):
+        if 'report(?: this)? profile' in script:
+            self.option_requests.append({'label': 'Report profile', 'mode': 'menu'})
+            return {
+                'clicked': self.report_entry_count == 1,
+                'count': self.report_entry_count,
+                'labels': ['Report profile', 'Help Bronson', 'Block'],
+            }
         if 'uniqueRows' in script:
             self.option_requests.append(arg)
             index = arg['index']
@@ -72,7 +80,7 @@ class FacebookMenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             page.option_requests,
             [
-                {'index': 1, 'mode': 'menu'},
+                {'label': 'Report profile', 'mode': 'menu'},
                 {'index': 0, 'mode': 'active'},
                 {'index': 9, 'mode': 'active'},
                 {'index': 1, 'mode': 'active'},
@@ -90,7 +98,7 @@ class FacebookMenuTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             page.option_requests,
             [
-                {'index': 1, 'mode': 'menu'},
+                {'label': 'Report profile', 'mode': 'menu'},
                 {'index': 1, 'mode': 'dialog'},
                 {'index': 3, 'mode': 'dialog'},
                 {'index': 0, 'mode': 'dialog'},
@@ -104,11 +112,20 @@ class FacebookMenuTests(unittest.IsolatedAsyncioTestCase):
             await bot._click_facebook_more_menu(page, option_path=(option_number,))
             self.assertEqual(page.option_requests[-1]['index'], option_number - 1)
 
-    async def test_raises_when_scoped_menu_has_no_second_option(self):
+    async def test_raises_when_report_profile_entry_is_missing(self):
         bot = object.__new__(MessengerBot)
-        page = FakePage(option_count=1)
+        page = FakePage(report_entry_count=0)
 
-        with self.assertRaisesRegex(RuntimeError, 'second scoped text option'):
+        with self.assertRaisesRegex(RuntimeError, 'exactly one Report profile option'):
+            await bot._click_facebook_more_menu(page, option_path=(1,))
+
+        self.assertEqual(page.clicks, ['more-control'])
+
+    async def test_raises_when_report_profile_entry_is_ambiguous(self):
+        bot = object.__new__(MessengerBot)
+        page = FakePage(report_entry_count=2)
+
+        with self.assertRaisesRegex(RuntimeError, 'exactly one Report profile option'):
             await bot._click_facebook_more_menu(page, option_path=(1,))
 
         self.assertEqual(page.clicks, ['more-control'])
@@ -158,4 +175,3 @@ class FacebookMenuTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
