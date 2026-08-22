@@ -137,6 +137,13 @@ _CLICK_FACEBOOK_REPORT_PROFILE_JS = r"""
 """
 
 
+_CHAT_PROMPT_MAX_CHARACTERS = 7000
+_CHAT_ROSTER_MAX_CHARACTERS = 1200
+# Messenger occasionally leaves a headless page with a frozen accessibility DOM.
+# Refresh after roughly one minute of no DOM change so new messages become visible.
+_MONITOR_REFRESH_IDLE_POLLS = 12
+
+
 _CLICK_FACEBOOK_SUBMIT_JS = r"""
 (confirm) => {
   const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
@@ -562,21 +569,35 @@ class MessengerBot:
 
     async def _monitor(self, page: Page) -> None:
         self.last_observed_text = await self._page_text(page)
+        idle_polls = 0
         print("MONITORING ACTIVE. Existing messages are checkpointed; only new mentions will be handled.")
 
         while True:
             try:
+                # Keep the virtualized Messenger scroller at the newest messages;
+                # this is independent of the user's phone/browser scroll position.
+                await page.evaluate(_PICK_SCROLLER_JS)
+                await page.evaluate(_SCROLL_BOTTOM_JS)
                 full_text = await self._page_text(page)
                 if not full_text:
+                    idle_polls += 1
+                    if idle_polls >= _MONITOR_REFRESH_IDLE_POLLS:
+                        await self._refresh_monitor_page(page)
+                        idle_polls = 0
                     await asyncio.sleep(self.settings.poll_interval_seconds)
                     continue
 
                 new_text = self._newly_appended_text(self.last_observed_text, full_text)
                 self.last_observed_text = full_text
                 if not new_text:
+                    idle_polls += 1
+                    if idle_polls >= _MONITOR_REFRESH_IDLE_POLLS:
+                        await self._refresh_monitor_page(page)
+                        idle_polls = 0
                     await asyncio.sleep(self.settings.poll_interval_seconds)
                     continue
 
+                idle_polls = 0
                 self._append_transcript(new_text)
                 context = self.transcript[-self.settings.context_characters :]
                 fingerprint = self._fingerprint(new_text)
@@ -600,6 +621,20 @@ class MessengerBot:
             except Exception as error:
                 print(f"Monitor loop error: {error}")
                 await asyncio.sleep(10)
+
+    async def _refresh_monitor_page(self, page: Page) -> None:
+        """Reload Messenger after a prolonged unchanged DOM and restore the chat view."""
+        print("Messenger DOM unchanged; refreshing the group page to recover live polling.")
+        try:
+            await page.reload(wait_until="commit", timeout=60_000)
+            await asyncio.sleep(10)
+            await self._unlock_if_needed(page)
+            await page.evaluate(_PICK_SCROLLER_JS)
+            await page.evaluate(_SCROLL_BOTTOM_JS)
+            self.last_observed_text = await self._page_text(page)
+            print("Messenger group refresh complete; monitoring resumed.")
+        except Exception as error:
+            print(f"Messenger group refresh failed; will retry: {error}")
 
     async def _handle_request(self, page: Page, context: str, recent: str) -> None:
         request = parse_request(recent)
@@ -831,7 +866,14 @@ class MessengerBot:
                 control = controls.nth(index)
                 if not await control.is_visible():
                     continue
-                await control.click(timeout=10_000)
+                try:
+                    await control.click(timeout=10_000)
+                except Exception as error:
+                    # Facebook can leave a transient light-mode overlay above the
+                    # profile header. A DOM click is safe here because the control
+                    # was already verified visible and uniquely selected.
+                    print(f"Facebook More-options click intercepted; using DOM fallback: {error}")
+                    await control.evaluate("(element) => element.click()")
                 await asyncio.sleep(1)
 
                 report_entry = await tab.evaluate(_CLICK_FACEBOOK_REPORT_PROFILE_JS)
@@ -845,6 +887,40 @@ class MessengerBot:
                 report_prompt = await tab.evaluate(
                     "() => document.body.innerText.includes('Why are you reporting this profile?')"
                 )
+                scope_prompt = await tab.evaluate(
+                    "() => document.body.innerText.includes('What do you want to report?')"
+                )
+
+                # Current Facebook UI first asks whether the report concerns the
+                # profile or a specific post. /link targets profiles, so select
+                # the first scope row before following the user-provided path.
+                if scope_prompt:
+                    scope = await tab.evaluate(
+                        _CLICK_FACEBOOK_OPTION_JS,
+                        {"index": 0, "mode": "dialog"},
+                    )
+                    if not scope.get("clicked"):
+                        raise RuntimeError(
+                            "Facebook report scope did not expose a profile option: "
+                            f"{scope.get('labels', [])}"
+                        )
+                    await asyncio.sleep(1)
+                    for depth, number in enumerate(option_path):
+                        result = await tab.evaluate(
+                            _CLICK_FACEBOOK_OPTION_JS,
+                            {"index": number - 1, "mode": "dialog"},
+                        )
+                        if not result.get("clicked"):
+                            raise RuntimeError(
+                                f"Facebook nested option path failed at depth {depth + 1}: "
+                                f"{result.get('labels', [])}"
+                            )
+                        if depth < len(option_path) - 1:
+                            await asyncio.sleep(1)
+                    return await self._finish_facebook_submission(
+                        tab, option_path, submit_requested, confirm_submit
+                    )
+
                 if report_prompt:
                     for depth, number in enumerate(option_path):
                         result = await tab.evaluate(
@@ -922,13 +998,31 @@ class MessengerBot:
         """Stop safely or click exactly one final Submit button after confirmation."""
         if not submit_requested:
             return "selected"
-        result = await tab.evaluate(_CLICK_FACEBOOK_SUBMIT_JS, confirm_submit)
+
+        # Facebook renders the final confirmation sheet asynchronously after the
+        # last category click. Poll briefly instead of assuming the button exists
+        # immediately; otherwise valid paths fail intermittently with count=0.
+        deadline = time.monotonic() + 10.0
+        result: dict[str, Any] = {"ready": False, "count": 0, "clicked": False}
+        while time.monotonic() < deadline:
+            result = await tab.evaluate(_CLICK_FACEBOOK_SUBMIT_JS, False)
+            if result.get("ready"):
+                break
+            await asyncio.sleep(0.5)
         if not result.get("ready"):
             raise RuntimeError(
                 "Facebook final Submit control was not uniquely visible; "
                 f"found {result.get('count', 0)} matching controls for path {option_path}"
             )
-        return "submitted" if result.get("clicked") else "awaiting_confirmation"
+        if confirm_submit:
+            result = await tab.evaluate(_CLICK_FACEBOOK_SUBMIT_JS, True)
+            if not result.get("ready") or not result.get("clicked"):
+                raise RuntimeError(
+                    "Facebook final Submit control disappeared before confirmation for "
+                    f"path {option_path}"
+                )
+            return "submitted"
+        return "awaiting_confirmation"
 
     async def _plan_video(self, prompt: str, is_music: bool) -> VideoPlan:
         """Turn a raw /video prompt into a structured creative plan via the LLM.
@@ -954,19 +1048,24 @@ class MessengerBot:
     async def _answer_mention(self, context: str) -> str:
         members = extract_members(self.transcript)
         roster = ", ".join(members) if members else "unknown (history not yet loaded)"
-        prompt = f"""You are {self.settings.bot_name}, replying inside a Messenger group.
+        roster = roster[:_CHAT_ROSTER_MAX_CHARACTERS]
+        prefix = f"""You are {self.settings.bot_name}, replying inside a Messenger group.
 
 Group members (everyone who has spoken in this group, most active first):
 {roster}
 
 Recent conversation history (oldest at the top, newest at the bottom):
 ---
-{context}
+"""
+        suffix = """
 ---
 
 Reply only to the newest question or request addressed to you. Match the user’s language and script exactly: Bengali, Banglish, or English. Be concise, useful, and natural.
 
 The "Group members" list above is the complete roster of who is in this group, drawn from the entire message history — trust it when asked who is in the group or who someone is, even if that person has not spoken in the recent history shown below. For comparisons about fluency, manners, skills, or behavior, make claims only when the conversation history provides direct support. Name the observable examples briefly. If the history does not provide enough evidence, say that clearly instead of inventing a ranking, member fact, or history. Do not generate image, voice, song, or edit requests in normal chat—tell users to use the explicit slash command if relevant. Output only the message that should be posted."""
+        available = max(500, _CHAT_PROMPT_MAX_CHARACTERS - len(prefix) - len(suffix))
+        context = (context or "")[-available:]
+        prompt = prefix + context + suffix
         # Plain mentions (simple tasks) are answered by Meta AI; media commands stay on Manus.
         # If Meta is unconfigured or errors, transparently fall back to a Manus text reply.
         if self.meta.enabled:

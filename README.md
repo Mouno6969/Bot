@@ -72,7 +72,9 @@ Use `./start_bot.sh --foreground` while debugging. Runtime logs are written to `
 
 The bot checkpoints the conversation when it starts, then considers only newly appended message text. It keeps a small persistent fingerprint history, rejects its own sent text, and processes each new mention once. Media tasks send an acknowledgement first, wait for a generated attachment, and fail cleanly rather than holding the monitor loop indefinitely.
 
-At startup the bot scrolls up through the group and merges older messages into a rolling local transcript (`bot_history.txt`, tuned by `BOT_HISTORY_SCROLLS` and `BOT_HISTORY_CHARACTERS`, never committed). New messages are appended live, and replies are generated from the last `BOT_CONTEXT_CHARACTERS` of that transcript, so answers can reference much older conversation instead of only what happens to be rendered on screen.
+At startup the bot scrolls up through the group and merges older messages into a rolling local transcript (`bot_history.txt`, tuned by `BOT_HISTORY_SCROLLS` and `BOT_HISTORY_CHARACTERS`, never committed). New messages are appended live, and replies are generated from a bounded tail of that transcript, so answers can reference older conversation without exceeding the model input limit.
+
+For `/link`, Facebook’s current report UI first asks whether the report concerns the profile or a specific post. The bot automatically selects the profile scope, then follows the numeric option path supplied in the command. The final Submit step remains protected behind the separate `/link confirm` command.
 
 ## Security checklist
 
