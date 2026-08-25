@@ -47,8 +47,10 @@ class LinkQuantityHandlerTests(unittest.IsolatedAsyncioTestCase):
         bot.state.pending_link_url = url
         bot.state.pending_link_path = (2, 4, 1)
         bot.state.pending_link_quantity = 3
+        bot.state.pending_link_sender = "Shahidulla"
+        bot.state.pending_link_created_at = 1e20
 
-        await bot._handle_request(None, "", "@Shahidulla /link confirm")
+        await bot._handle_request(None, "", "Message sent 10:00 by Shahidulla: @Shahidulla /link confirm")
 
         self.assertEqual(
             bot.visits,
@@ -62,6 +64,47 @@ class LinkQuantityHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.state.pending_link_path, ())
         self.assertEqual(bot.state.pending_link_quantity, 0)
         self.assertIn("3 ta complete", bot.sent[-1])
+
+    async def test_quantity_above_cap_is_rejected_before_visit(self):
+        bot = self._bot()
+        url = "https://www.facebook.com/example.user"
+
+        await bot._handle_request(
+            None,
+            "",
+            f"Message sent 10:00 by Shahidulla: @Shahidulla /link {url} 2 quantity 11 submit",
+        )
+
+        self.assertEqual(bot.visits, [])
+        self.assertIn("maximum 10", bot.sent[-1])
+
+    async def test_confirmation_from_different_sender_is_rejected(self):
+        bot = self._bot()
+        bot.state.pending_link_url = "https://www.facebook.com/example.user"
+        bot.state.pending_link_path = (2, 4)
+        bot.state.pending_link_quantity = 1
+        bot.state.pending_link_sender = "Shahidulla"
+        bot.state.pending_link_created_at = 1e20
+
+        await bot._handle_request(None, "", "Message sent 10:00 by Other Person: @Shahidulla /link confirm")
+
+        self.assertEqual(bot.visits, [])
+        self.assertIn("sender", bot.sent[-1])
+
+    async def test_expired_confirmation_is_cleared(self):
+        bot = self._bot()
+        bot.state.pending_link_url = "https://www.facebook.com/example.user"
+        bot.state.pending_link_path = (2, 4)
+        bot.state.pending_link_quantity = 1
+        bot.state.pending_link_sender = "Shahidulla"
+        bot.state.pending_link_created_at = 1.0
+
+        await bot._handle_request(None, "", "Message sent 10:00 by Shahidulla: @Shahidulla /link confirm")
+
+        self.assertEqual(bot.visits, [])
+        self.assertEqual(bot.state.pending_link_url, "")
+        self.assertEqual(bot.state.pending_link_quantity, 0)
+        self.assertIn("shomoy shesh", bot.sent[-1])
 
 
 if __name__ == "__main__":

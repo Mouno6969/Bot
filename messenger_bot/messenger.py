@@ -142,6 +142,8 @@ _CHAT_ROSTER_MAX_CHARACTERS = 1200
 # Messenger occasionally leaves a headless page with a frozen accessibility DOM.
 # Refresh after roughly one minute of no DOM change so new messages become visible.
 _MONITOR_REFRESH_IDLE_POLLS = 12
+_LINK_MAX_QUANTITY = 10
+_LINK_CONFIRM_TTL_SECONDS = 10 * 60
 
 
 _CLICK_FACEBOOK_SUBMIT_JS = r"""
@@ -393,6 +395,8 @@ class BotState:
     pending_link_url: str = ""
     pending_link_path: tuple[int, ...] = ()
     pending_link_quantity: int = 0
+    pending_link_sender: str = ""
+    pending_link_created_at: float = 0.0
 
     @classmethod
     def load(cls, path: Path) -> "BotState":
@@ -404,6 +408,8 @@ class BotState:
                 raw.get("pending_link_url", ""),
                 tuple(raw.get("pending_link_path", [])),
                 int(raw.get("pending_link_quantity", 0)),
+                str(raw.get("pending_link_sender", "")),
+                float(raw.get("pending_link_created_at", 0.0)),
             )
         except (FileNotFoundError, OSError, ValueError, TypeError):
             return cls()
@@ -417,6 +423,8 @@ class BotState:
                     "pending_link_url": self.pending_link_url,
                     "pending_link_path": list(self.pending_link_path),
                     "pending_link_quantity": self.pending_link_quantity,
+                    "pending_link_sender": self.pending_link_sender,
+                    "pending_link_created_at": self.pending_link_created_at,
                 },
                 ensure_ascii=False,
             ),
@@ -646,9 +654,27 @@ class MessengerBot:
             if not self.state.pending_link_url or not self.state.pending_link_path:
                 await self._send_text(page, "No pending Facebook submission confirm korte parini.", reply_to=reply_to)
                 return
+            sender = self._request_sender(recent)
+            age = time.time() - self.state.pending_link_created_at if self.state.pending_link_created_at else float("inf")
+            if (
+                not self.state.pending_link_sender
+                or not sender
+                or sender.casefold() != self.state.pending_link_sender.casefold()
+            ):
+                await self._send_text(page, "Ei confirmation ta oi pending request-er sender thekei dite hobe.", reply_to=reply_to)
+                return
+            if age > _LINK_CONFIRM_TTL_SECONDS:
+                self.state.pending_link_url = ""
+                self.state.pending_link_path = ()
+                self.state.pending_link_quantity = 0
+                self.state.pending_link_sender = ""
+                self.state.pending_link_created_at = 0.0
+                self.state.save(self.settings.state_file)
+                await self._send_text(page, "Pending Facebook confirmation-er shomoy shesh hoye geche; abar request dao.", reply_to=reply_to)
+                return
             pending_url = self.state.pending_link_url
             pending_path = self.state.pending_link_path
-            remaining = self.state.pending_link_quantity or 1
+            remaining = min(self.state.pending_link_quantity or 1, _LINK_MAX_QUANTITY)
             completed = 0
             try:
                 for attempt in range(1, remaining + 1):
@@ -673,6 +699,8 @@ class MessengerBot:
             self.state.pending_link_url = ""
             self.state.pending_link_path = ()
             self.state.pending_link_quantity = 0
+            self.state.pending_link_sender = ""
+            self.state.pending_link_created_at = 0.0
             self.state.save(self.settings.state_file)
             await self._send_text(
                 page,
@@ -708,9 +736,18 @@ class MessengerBot:
                 )
                 return
             link_url, option_path, submit_requested, quantity = selection
+            if quantity > _LINK_MAX_QUANTITY:
+                await self._send_text(
+                    page,
+                    f"Quantity maximum {_LINK_MAX_QUANTITY}; chhoto quantity diye abar request dao.",
+                    reply_to=reply_to,
+                )
+                return
             self.state.pending_link_url = ""
             self.state.pending_link_path = ()
             self.state.pending_link_quantity = 0
+            self.state.pending_link_sender = ""
+            self.state.pending_link_created_at = 0.0
             try:
                 result = await self._visit_facebook_link(
                     page,
@@ -731,6 +768,8 @@ class MessengerBot:
                 self.state.pending_link_url = link_url
                 self.state.pending_link_path = option_path
                 self.state.pending_link_quantity = quantity
+                self.state.pending_link_sender = self._request_sender(recent)
+                self.state.pending_link_created_at = time.time()
                 self.state.save(self.settings.state_file)
                 await self._send_text(
                     page,
@@ -1082,6 +1121,14 @@ The "Group members" list above is the complete roster of who is in this group, d
         except MediaError as error:
             print(f"Manus reply error: {error}")
             return "দুঃখিত, এখন উত্তরটা তৈরি করতে পারছি না। একটু পরে আবার mention দাও।"
+
+    @staticmethod
+    def _request_sender(recent: str) -> str:
+        """Return the sender of the newest parsed message in a scraped fragment."""
+        matches = list(_MESSAGE_PATTERN.finditer(recent or ""))
+        if not matches:
+            return ""
+        return " ".join(matches[-1].group(2).split()).strip()
 
     @staticmethod
     def _reply_anchor(recent: str) -> str:

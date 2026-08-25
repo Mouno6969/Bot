@@ -74,7 +74,7 @@ The bot checkpoints the conversation when it starts, then considers only newly a
 
 At startup the bot scrolls up through the group and merges older messages into a rolling local transcript (`bot_history.txt`, tuned by `BOT_HISTORY_SCROLLS` and `BOT_HISTORY_CHARACTERS`, never committed). New messages are appended live, and replies are generated from a bounded tail of that transcript, so answers can reference older conversation without exceeding the model input limit.
 
-For `/link`, Facebook’s current report UI first asks whether the report concerns the profile or a specific post. The bot automatically selects the profile scope, then follows the numeric option path supplied in the command. To stage a final action, append `submit`; after checking that the category is truthful, send the separate mentioned command `@Shahidulla /link confirm`. The final Submit step remains protected behind that confirmation command.
+For `/link`, Facebook’s current report UI first asks whether the report concerns the profile or a specific post. The bot automatically selects the profile scope, then follows the numeric option path supplied in the command. To stage a final action, append `submit`; after checking that the category is truthful, send the separate mentioned command `@Shahidulla /link confirm`. The final Submit step remains protected behind that confirmation command. Each request is capped at **10 submissions**, and confirmation is accepted only from the original requester within **10 minutes**; stale or mismatched confirmations are rejected and cleared.
 
 ## Security checklist
 
