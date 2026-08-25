@@ -72,6 +72,11 @@ class RouterTests(unittest.TestCase):
         self.assertIsNone(parse_link_selection(f"{url} 2 quantity 0"))
         self.assertIsNone(parse_link_selection(f"{url} 2 quantity 3 extra"))
 
+    def test_link_confirm_is_parsed_without_a_url(self):
+        result = parse_request("@Shahidulla Kaysar /link confirm")
+        self.assertEqual(result.kind, RequestKind.LINK)
+        self.assertEqual(result.argument, "confirm")
+
     def test_normal_mention_remains_chat(self):
         result = parse_request("@Shahidulla who has communicated most clearly?")
         self.assertEqual(result.kind, RequestKind.CHAT)

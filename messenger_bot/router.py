@@ -61,7 +61,13 @@ def parse_request(message_text: str) -> RoutedRequest:
 
     command, argument = match.groups()
     command = _COMMAND_ALIASES.get(command.casefold(), command.casefold())
-    return RoutedRequest(RequestKind(command), normalize_text(argument))
+    argument = normalize_text(argument)
+    # Confirmation is intentionally a separate command with no URL. Handle it
+    # before parse_link_selection(), which correctly requires a Facebook URL for
+    # every other /link form.
+    if command == "link" and argument.casefold() == "confirm":
+        return RoutedRequest(RequestKind.LINK, "confirm")
+    return RoutedRequest(RequestKind(command), argument)
 
 
 def help_text() -> str:
