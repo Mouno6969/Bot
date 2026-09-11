@@ -15,6 +15,20 @@ A mention-driven Facebook Messenger group bot that responds in **Bengali, Bangli
 | Normal mention | `@Shahidulla Who communicated most clearly?` | Returns a regular context-aware reply. Comparative answers only use evidence visible in the recent chat; when evidence is inadequate, the bot says so. |
 | `/help` | `@Shahidulla /help` | Posts the command guide in the chat. |
 
+### Games, credits, and ranking
+
+The bot also hosts a credit economy with a persistent leaderboard (see `COMMANDS.md` for the full game table):
+
+| Command | Example | Result |
+| --- | --- | --- |
+| `/quiz [category]` | `@Shahidulla /quiz` | Posts a multiple-choice question; the first correct `/answer B`-style reply inside the time window wins **40 credits**. |
+| `/race [lane]` | `@Shahidulla /race 3` | Opens/joins a horse-race lobby (min 2 players). The bot posts the track once, then **edits that same message every few seconds** as the horses run; empty lanes race as NPCs. Winner takes the pot (players × 20 credits). |
+| `/guess <number>` | `@Shahidulla /guess 27` | Number-guess rounds with higher/lower hints; the correct guess wins **30 credits**. |
+| `/flip <heads\|tails> <amount>` | `@Shahidulla /flip heads 50` | Coin-flip bet: win doubles the stake, losing costs it. |
+| `/daily`, `/balance`, `/ranking` | `@Shahidulla /ranking` | Free daily credits, your wallet/stats, and the top-10 leaderboard. |
+
+New players start with **100 credits**. Race results, reveals, and lobby timers are driven by local timers only — games never touch the media or chat models, so they are instant and free.
+
 For `/edit`, attach the image and write the mention plus edit instruction **in the same Messenger message**. The bot checks the latest attached image and does not use profile pictures as source images.
 
 ## Project layout
@@ -24,10 +38,12 @@ For `/edit`, attach the image and write the mention plus edit instruction **in t
 | `fb_bot.py` | Small application entry point. |
 | `messenger_bot/config.py` | Environment-based configuration and validation. |
 | `messenger_bot/router.py` | Deterministic mention and slash-command parser. |
+| `messenger_bot/games.py` | Credit economy, quiz, horse race, number guess, coin flip, daily bonus, and leaderboard. |
+| `messenger_bot/questions.py` | Local quiz question bank (no API calls needed for quizzes). |
 | `messenger_bot/media.py` | Manus task creation, local-image upload, result polling, and attachment download. |
-| `messenger_bot/messenger.py` | Messenger monitoring, idempotency, prompts, and file delivery. |
+| `messenger_bot/messenger.py` | Messenger monitoring, idempotency, prompts, file delivery, game ticking, and live message editing. |
 | `COMMANDS.md` | Short command reference for group users. |
-| `tests/` | Command routing and anti-spam regression tests. |
+| `tests/` | Command routing, game engine, and anti-spam regression tests. |
 
 ## Local setup
 

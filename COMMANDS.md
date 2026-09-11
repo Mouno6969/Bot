@@ -11,6 +11,22 @@ The bot responds to commands only when the message also contains a mention of **
 | `/link <Facebook URL> <option path> [quantity <number>] [submit]` | `@Shahidulla /link https://www.facebook.com/username 2 4 1 quantity 3 submit` | Follows the existing option path. `quantity 3` repeats the same flow three times after confirmation. The final `submit` remains explicit, and `/link confirm` executes the pending quantity. |
 | Mention + normal request | `@Shahidulla Who has used English most clearly in this chat?` | Replies in the language of the request and bases conclusions only on observable recent chat context. |
 
+## Games, credits, and ranking
+
+Every player starts with **100 free credits**. Winners earn credits, losers keep playing — game commands are instant and never use the media APIs.
+
+| Command | Example | Behavior |
+| --- | --- | --- |
+| `/games` | `@Shahidulla /games` | Shows the full game menu. |
+| `/quiz [category]` | `@Shahidulla /quiz sports` | Posts a multiple-choice question (categories: general, science, bangladesh, sports, fun). The first correct answer within the time limit wins **40 credits**. |
+| `/answer <A\|B\|C\|D>` | `@Shahidulla /answer B` | Answers the active quiz. Numbers 1–4 also work. |
+| `/race [lane]` | `@Shahidulla /race 3` | Opens/joins a horse-race lobby (minimum 2 players). The race track message is **edited live** as the horses run; empty lanes race as NPCs. Winner takes the pot (players × 20 credits). The lobby creator can type `/race go` to start early. |
+| `/guess [number]` | `@Shahidulla /guess 27` | `/guess` alone starts a round (bot thinks of 1–50); `/guess 27` tries that number. The bot hints higher/lower; the correct guess wins **30 credits**. |
+| `/flip <heads\|tails> <amount>` | `@Shahidulla /flip heads 50` | Coin-flip bet: win doubles the stake, losing costs it. Minimum bet 10 credits. |
+| `/daily` | `@Shahidulla /daily` | Free **60 credits** once every 20 hours. |
+| `/balance` (or `/credits`, `/wallet`) | `@Shahidulla /balance` | Shows your credits, games played, wins, and leaderboard rank. |
+| `/ranking` (or `/leaderboard`, `/rank`) | `@Shahidulla /ranking` | Top 10 credit holders with win counts. |
+
 > **Image-editing format:** attach the image and include the mention and `/edit` instruction in the same Messenger message. The bot preserves non-requested visual details unless the instruction says otherwise.
 
 > **Media delivery:** the bot posts a short acknowledgement before generating. It then uploads the resulting image, audio, or song file once the generation task completes.

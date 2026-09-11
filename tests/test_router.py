@@ -1,7 +1,9 @@
 import unittest
 
 from messenger_bot.router import (
+    GAME_KINDS,
     RequestKind,
+    games_help_text,
     has_mention,
     is_facebook_url,
     parse_link_selection,
@@ -80,6 +82,57 @@ class RouterTests(unittest.TestCase):
     def test_normal_mention_remains_chat(self):
         result = parse_request("@Shahidulla who has communicated most clearly?")
         self.assertEqual(result.kind, RequestKind.CHAT)
+
+    def test_game_commands_are_parsed(self):
+        expected = {
+            "/games": RequestKind.GAMES,
+            "/quiz": RequestKind.QUIZ,
+            "/quiz sports": (RequestKind.QUIZ, "sports"),
+            "/answer B": (RequestKind.ANSWER, "B"),
+            "/race": RequestKind.RACE,
+            "/race 3": (RequestKind.RACE, "3"),
+            "/race go": (RequestKind.RACE, "go"),
+            "/guess": RequestKind.GUESS,
+            "/guess 27": (RequestKind.GUESS, "27"),
+            "/flip heads 50": (RequestKind.FLIP, "heads 50"),
+            "/balance": RequestKind.BALANCE,
+            "/credits": RequestKind.BALANCE,
+            "/wallet": RequestKind.BALANCE,
+            "/ranking": RequestKind.RANKING,
+            "/leaderboard": RequestKind.RANKING,
+            "/rank": RequestKind.RANKING,
+            "/daily": RequestKind.DAILY,
+        }
+        for line, want in expected.items():
+            result = parse_request(f"@Shahidulla {line}")
+            if isinstance(want, tuple):
+                self.assertEqual(result.kind, want[0], line)
+                self.assertEqual(result.argument, want[1], line)
+            else:
+                self.assertEqual(result.kind, want, line)
+                self.assertEqual(result.argument, "", line)
+        # Every non-help game kind routes to the local game engine.
+        for kind in expected.values():
+            if isinstance(kind, tuple):
+                kind = kind[0]
+            if kind != RequestKind.GAMES:
+                self.assertIn(kind, GAME_KINDS)
+
+    def test_game_argument_stops_at_end_of_command_line(self):
+        scrape = (
+            "@Shahidulla /flip tails 100\n"
+            "Compose\n"
+            "Chat members\n"
+            "Privacy & support\n"
+        )
+        result = parse_request(scrape)
+        self.assertEqual(result.kind, RequestKind.FLIP)
+        self.assertEqual(result.argument, "tails 100")
+
+    def test_games_help_lists_every_game_command(self):
+        text = games_help_text()
+        for command in ("/quiz", "/answer", "/race", "/guess", "/flip", "/daily", "/balance", "/ranking"):
+            self.assertIn(command, text)
 
     def test_argument_stops_at_end_of_command_line(self):
         # Messenger's accessibility scrape appends UI chrome after the message.
