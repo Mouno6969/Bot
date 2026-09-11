@@ -19,6 +19,30 @@ class RequestKind(str, Enum):
     VIDEO = "video"
     MUSICVIDEO = "musicvideo"
     LINK = "link"
+    GAMES = "games"
+    QUIZ = "quiz"
+    ANSWER = "answer"
+    RACE = "race"
+    GUESS = "guess"
+    FLIP = "flip"
+    BALANCE = "balance"
+    RANKING = "ranking"
+    DAILY = "daily"
+
+
+# Command kinds that never call a model or media API — they run entirely inside
+# the local game engine and reply instantly.
+GAME_KINDS = (
+    RequestKind.GAMES,
+    RequestKind.QUIZ,
+    RequestKind.ANSWER,
+    RequestKind.RACE,
+    RequestKind.GUESS,
+    RequestKind.FLIP,
+    RequestKind.BALANCE,
+    RequestKind.RANKING,
+    RequestKind.DAILY,
+)
 
 
 @dataclass(frozen=True)
@@ -34,12 +58,20 @@ class RoutedRequest:
 # generator then dutifully reads aloud or sings. Stopping at the newline keeps
 # only what the user actually typed after the command.
 COMMAND_PATTERN = re.compile(
-    r"/(image|voice|edit|sing|help|calculate|stats|musicvideo|video|link)\b[ \t]*([^\n\r]*)",
+    r"/(image|voice|edit|sing|help|calculate|stats|musicvideo|video|link"
+    r"|games|quiz|answer|race|guess|flip|balance|credits|wallet"
+    r"|ranking|leaderboard|rank|daily)\b[ \t]*([^\n\r]*)",
     re.IGNORECASE,
 )
 
-# "/stats" is a friendly alias for "/calculate"; both map to the same handler.
-_COMMAND_ALIASES = {"stats": "calculate"}
+# "/stats" is a friendly alias for "/calculate"; game commands get short aliases too.
+_COMMAND_ALIASES = {
+    "stats": "calculate",
+    "credits": "balance",
+    "wallet": "balance",
+    "leaderboard": "ranking",
+    "rank": "ranking",
+}
 
 
 def normalize_text(text: str) -> str:
@@ -78,7 +110,25 @@ def help_text() -> str:
         "/voice <text>, /sing <brief or lyrics>, /link <Facebook URL> <option path> [quantity <number>] [submit], "
         "/edit <instruction> with an image attached in the same message, and "
         "/calculate for the group message count and per-member ranking. "
+        "Games use credits and a leaderboard — try /games for the full list. "
         "For all other questions, just mention me."
+    )
+
+
+def games_help_text() -> str:
+    return (
+        "🎮 GAME ZONE — shobai credits khelo! 🎮\n"
+        "• /quiz [category] — multiple-choice quiz; prothom shothik jawab pabe credits "
+        f"(category: general, science, bangladesh, sports, fun)\n"
+        "• /answer <A|B|C|D> — active quiz er jawab dao\n"
+        "• /race [lane] — horse race lobby te join koro; race track live edit hote thakbe, "
+        "jitla pot! /race go diye creator agey start korte pare\n"
+        "• /guess — ami 1-50 er moddhe number bhabbo; /guess <number> diye dhoro\n"
+        "• /flip <heads|tails> <amount> — coin flip bet; jitla double, haarla bet jabe\n"
+        "• /daily — protidiner free credits\n"
+        "• /balance — tomar credits, wins, ar rank\n"
+        "• /ranking — leaderboard: top 10 credit holders\n"
+        "Notun player ra 100 starter credits pay. Shob command e amake mention koro!"
     )
 
 

@@ -16,11 +16,14 @@ import requests
 from playwright.async_api import BrowserContext, Page, async_playwright
 
 from .config import Settings
+from .games import Edit, GameManager, Post
 from .media import ManusMediaClient, MediaAsset, MediaError
 from .meta_ai import MetaChatClient, MetaError
 from .router import (
+    GAME_KINDS,
     RequestKind,
     RoutedRequest,
+    games_help_text,
     has_mention,
     help_text,
     is_facebook_url,
@@ -270,6 +273,71 @@ _REPLYING_PREVIEW_JS = r"""
 }
 """
 
+# --- In-place message editing (animated game frames) ------------------------------
+# The horse race (and any future animated game) rewrites the bot's OWN previous
+# message instead of spamming new ones. Like native Reply, this is done through
+# the real UI: tag the newest message containing the anchor text, physically
+# hover it, open its hover toolbar, and click "Edit" (direct button or via the
+# "More actions" overflow). The edit box renders INSIDE the message article, so
+# the textbox locator is article-scoped. Every step returns falsy on failure and
+# the caller falls back to posting a fresh message — nothing ever gets stuck.
+_TAG_EDIT_TARGET_JS = r"""
+(anchor) => {
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const needle = norm(anchor);
+  if (!needle) return null;
+  document.querySelectorAll('[data-edit-target]').forEach(e => e.removeAttribute('data-edit-target'));
+  const btns = Array.from(document.querySelectorAll('[role="button"][aria-label*="Message sent"]'));
+  // Newest match is the frame to rewrite; scan from the end.
+  const target = btns.reverse().find(b => norm(b.getAttribute('aria-label')).includes(needle));
+  if (!target) return null;
+  const article = target.closest('[role="article"]') || target.parentElement;
+  if (!article) return null;
+  article.setAttribute('data-edit-target', '1');
+  article.scrollIntoView({block: 'center'});
+  return true;
+}
+"""
+_EDIT_TARGET_RECT_JS = r"""
+() => {
+  const a = document.querySelector('[data-edit-target]');
+  if (!a) return null;
+  const r = a.getBoundingClientRect();
+  return {x: r.left, y: r.top, w: r.width, h: r.height};
+}
+"""
+_CLICK_EDIT_IN_ARTICLE_JS = r"""
+() => {
+  const art = document.querySelector('[data-edit-target]');
+  if (!art) return {path: 'no-article'};
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const buttons = Array.from(art.querySelectorAll('[role="button"]')).filter(visible);
+  const direct = buttons.find((b) => (b.getAttribute('aria-label') || '').trim().toLowerCase().startsWith('edit'));
+  if (direct) { direct.click(); return {path: 'direct'}; }
+  const more = buttons.find((b) => (b.getAttribute('aria-label') || '').trim().toLowerCase().startsWith('more'));
+  if (more) { more.click(); return {path: 'opened-more'}; }
+  return {path: 'no-control'};
+}
+"""
+_CLICK_EDIT_MENUITEM_JS = r"""
+() => {
+  const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+  const edit = items.find(m => {
+    const t = (m.getAttribute('aria-label') || m.innerText || '').trim().toLowerCase();
+    return t === 'edit' || t.startsWith('edit');
+  });
+  if (edit) { edit.click(); return true; }
+  return false;
+}
+"""
+_EDIT_BOX_ACTIVE_JS = r"""
+() => {
+  const art = document.querySelector('[data-edit-target]');
+  if (!art) return false;
+  return Boolean(art.querySelector('div[role="textbox"][contenteditable="true"]'));
+}
+"""
+
 # --- Media send confirmation --------------------------------------------------------
 # Attaching a file only stages a LOCAL preview in the composer; the message is not sent
 # until that staged attachment clears (Messenger removes the preview once it accepts the
@@ -397,12 +465,18 @@ class BotState:
     pending_link_quantity: int = 0
     pending_link_sender: str = ""
     pending_link_created_at: float = 0.0
+    # Per-message fingerprints of handled triggers. The chunk-level ``processed``
+    # hash changes every time the DOM is rewritten (for example when the horse
+    # race edits its frame message every few seconds), so a rewritten tail could
+    # otherwise resurface an already-handled mention as "new" and re-fire an
+    # expensive command. Message-level ids survive DOM rewrites.
+    processed_messages: deque[str] = field(default_factory=lambda: deque(maxlen=120))
 
     @classmethod
     def load(cls, path: Path) -> "BotState":
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            return cls(
+            state = cls(
                 deque(raw.get("processed", []), maxlen=80),
                 raw.get("last_reply", ""),
                 raw.get("pending_link_url", ""),
@@ -411,6 +485,8 @@ class BotState:
                 str(raw.get("pending_link_sender", "")),
                 float(raw.get("pending_link_created_at", 0.0)),
             )
+            state.processed_messages = deque(raw.get("processed_messages", []), maxlen=120)
+            return state
         except (FileNotFoundError, OSError, ValueError, TypeError):
             return cls()
 
@@ -425,6 +501,7 @@ class BotState:
                     "pending_link_quantity": self.pending_link_quantity,
                     "pending_link_sender": self.pending_link_sender,
                     "pending_link_created_at": self.pending_link_created_at,
+                    "processed_messages": list(self.processed_messages),
                 },
                 ensure_ascii=False,
             ),
@@ -438,6 +515,13 @@ class MessengerBot:
         self.state = BotState.load(settings.state_file)
         self.media = ManusMediaClient(settings)
         self.meta = MetaChatClient(settings)
+        self.games = GameManager(
+            settings.games_state_file,
+            quiz_seconds=settings.quiz_seconds,
+            guess_seconds=settings.guess_seconds,
+            race_lobby_seconds=settings.race_lobby_seconds,
+            race_frame_seconds=settings.race_frame_seconds,
+        )
         self.last_observed_text = ""
         self.transcript = self._load_transcript()
 
@@ -582,6 +666,10 @@ class MessengerBot:
 
         while True:
             try:
+                # Games have their own timers (quiz reveal, race lobby, and the
+                # animated race frames). The tick is exception-proof and cheap
+                # when idle, so it runs on every poll.
+                await self._game_tick(page)
                 # Keep the virtualized Messenger scroller at the newest messages;
                 # this is independent of the user's phone/browser scroll position.
                 await page.evaluate(_PICK_SCROLLER_JS)
@@ -616,8 +704,19 @@ class MessengerBot:
                 if not has_mention(new_text, self.settings.bot_name):
                     await asyncio.sleep(self.settings.poll_interval_seconds)
                     continue
+                # DOM rewrites (reactions, message edits, and the race's own live
+                # frame edits) turn the same mention into a "new" chunk with a new
+                # fingerprint. De-duplicate on the newest MENTIONED message inside
+                # the chunk so an already-answered request can never run twice.
+                message_fingerprint = self._newest_mention_fingerprint(new_text, self.settings.bot_name)
+                if message_fingerprint and message_fingerprint in self.state.processed_messages:
+                    self._remember(fingerprint)
+                    await asyncio.sleep(self.settings.poll_interval_seconds)
+                    continue
                 if self._is_self_activity(new_text):
                     self._remember(fingerprint)
+                    if message_fingerprint:
+                        self._remember_message(message_fingerprint)
                     await asyncio.sleep(self.settings.poll_interval_seconds)
                     continue
 
@@ -625,6 +724,8 @@ class MessengerBot:
                 await self._handle_request(page, context, new_text)
                 # Mark a message only after its response has been successfully delivered.
                 self._remember(fingerprint)
+                if message_fingerprint:
+                    self._remember_message(message_fingerprint)
                 await asyncio.sleep(5)
             except Exception as error:
                 print(f"Monitor loop error: {error}")
@@ -715,6 +816,20 @@ class MessengerBot:
             # Deterministic local computation over the full transcript—no model call,
             # so it answers immediately and for free.
             await self._send_text(page, format_stats(self.transcript, self.settings.bot_name), reply_to=reply_to)
+            return
+        if request.kind == RequestKind.GAMES:
+            await self._send_text(page, games_help_text(), reply_to=reply_to)
+            return
+        if request.kind in GAME_KINDS:
+            # Local game engine: instant, free, and never touches the media APIs.
+            # Prefer the sender of the MENTIONED message — during an active race the
+            # newest parsed message can be the bot's own frame, never a player.
+            sender = (
+                self._mention_sender(recent, self.settings.bot_name)
+                or self._request_sender(recent)
+            )
+            for action in self.games.handle(request.kind.value, sender, request.argument, time.time()):
+                await self._execute_game_action(page, action, reply_to=reply_to)
             return
         if request.kind == RequestKind.CHAT:
             answer = await self._answer_mention(context)
@@ -1123,6 +1238,20 @@ The "Group members" list above is the complete roster of who is in this group, d
             return "দুঃখিত, এখন উত্তরটা তৈরি করতে পারছি না। একটু পরে আবার mention দাও।"
 
     @staticmethod
+    def _mention_sender(text: str, bot_name: str) -> str:
+        """Return the sender of the newest parsed message that mentions the bot.
+
+        Falls back to "" when no message line carries the mention (the caller then
+        uses the newest-message sender as before).
+        """
+        for match in reversed(list(_MESSAGE_PATTERN.finditer(text or ""))):
+            sender = " ".join((match.group(2) or "").split()).strip()
+            body = " ".join((match.group(3) or "").split()).strip()
+            if sender and body and has_mention(body, bot_name):
+                return sender
+        return ""
+
+    @staticmethod
     def _request_sender(recent: str) -> str:
         """Return the sender of the newest parsed message in a scraped fragment."""
         matches = list(_MESSAGE_PATTERN.finditer(recent or ""))
@@ -1228,6 +1357,95 @@ The "Group members" list above is the complete roster of who is in this group, d
                 print(f"Composer send attempt {attempt} failed: {error}")
                 await self._recover_chat(page)
         raise RuntimeError(f"Messenger composer unavailable after 3 attempts: {last_error}")
+
+    async def _game_tick(self, page: Page) -> None:
+        """Run game timers and execute whatever the engine wants posted/edited."""
+        try:
+            actions = self.games.tick(time.time())
+        except Exception as error:  # noqa: BLE001 — games must never kill the monitor
+            print(f"Game tick error: {error}")
+            return
+        for action in actions:
+            try:
+                await self._execute_game_action(page, action)
+            except Exception as error:  # noqa: BLE001 — keep handling later actions
+                print(f"Game action failed: {error}")
+
+    async def _execute_game_action(self, page: Page, action: Post | Edit, reply_to: str | None = None) -> None:
+        if isinstance(action, Edit):
+            # Animated frames prefer in-place edits; if Messenger's edit UI is
+            # unreachable, post the frame as a new message so the game goes on.
+            if not await self._edit_message_text(page, action.anchor, action.text):
+                await self._send_text(page, action.text)
+            return
+        await self._send_text(page, action.text, reply_to=reply_to)
+
+    async def _edit_message_text(self, page: Page, anchor: str, new_text: str) -> bool:
+        """Rewrite the bot's newest message containing ``anchor`` via Messenger's Edit UI.
+
+        Best-effort like reply mode: returns True only when the edit box opened,
+        accepted the new text, and closed again. Any failure returns False so the
+        caller can post a fresh frame instead. Never raises.
+        """
+        if not anchor:
+            return False
+        try:
+            if not await page.evaluate(_TAG_EDIT_TARGET_JS, anchor):
+                return False
+            await asyncio.sleep(0.6)  # let the scroll-into-view settle before hovering
+            opened = False
+            for _ in range(4):
+                rect = await page.evaluate(_EDIT_TARGET_RECT_JS)
+                if not rect or rect["w"] <= 0 or rect["h"] <= 0:
+                    return False
+                # A real physical pointer move is required — Messenger ignores synthetic
+                # mouse events for revealing the hover toolbar (same as Reply mode).
+                cx = rect["x"] + rect["w"] / 2
+                cy = rect["y"] + rect["h"] / 2
+                await page.mouse.move(cx - 30, cy)
+                await page.mouse.move(cx, cy)
+                await asyncio.sleep(0.6)
+                result = await page.evaluate(_CLICK_EDIT_IN_ARTICLE_JS)
+                path = result.get("path")
+                if path == "direct":
+                    opened = True
+                    break
+                if path == "opened-more":
+                    await asyncio.sleep(0.8)
+                    if await page.evaluate(_CLICK_EDIT_MENUITEM_JS):
+                        opened = True
+                        break
+                    return False
+            if not opened:
+                return False
+            # The edit box renders inside the tagged article; wait for it to appear.
+            edit_box = page.locator('[data-edit-target] div[role="textbox"][contenteditable="true"]')
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                if await edit_box.count():
+                    break
+                await asyncio.sleep(0.4)
+            if not await edit_box.count():
+                return False
+            await edit_box.first.click(timeout=5_000)
+            await edit_box.first.fill(new_text, timeout=5_000)
+            await asyncio.sleep(0.2)
+            await page.keyboard.press("Enter")  # Enter saves the edit
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if not await page.evaluate(_EDIT_BOX_ACTIVE_JS):
+                    print(f"Game frame edited in place: {new_text[:60]!r}")
+                    return True
+                await asyncio.sleep(0.5)
+            print("Edit box never closed; abandoning the in-place edit.")
+            try:
+                await page.keyboard.press("Escape")  # cancel the abandoned edit box
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        except Exception as error:  # noqa: BLE001 — editing is best-effort
+            print(f"Could not edit message in place (will post a new frame): {error}")
+            return False
 
     async def _composer(self, page: Page):
         selectors = [
@@ -1388,6 +1606,28 @@ The "Group members" list above is the complete roster of who is in this group, d
     def _remember(self, fingerprint: str) -> None:
         self.state.processed.append(fingerprint)
         self.state.save(self.settings.state_file)
+
+    def _remember_message(self, message_fingerprint: str) -> None:
+        self.state.processed_messages.append(message_fingerprint)
+        self.state.save(self.settings.state_file)
+
+    @staticmethod
+    def _newest_mention_fingerprint(text: str, bot_name: str) -> str:
+        """Stable id for the newest message in a fragment that mentions the bot.
+
+        Unlike the whole-chunk fingerprint, this survives Messenger DOM rewrites
+        and in-place edits, so it can suppress resurfacing duplicates. The newest
+        mentioned (not merely newest any) message is used because the bot's own
+        game frames often sit at the end of the fragment. Returns "" when the
+        mention cannot be tied to a parsed message line — the caller then falls
+        back to the legacy chunk-fingerprint behavior.
+        """
+        for match in reversed(list(_MESSAGE_PATTERN.finditer(text or ""))):
+            sender = " ".join((match.group(2) or "").split()).strip()
+            body = " ".join((match.group(3) or "").split()).strip()
+            if sender and body and has_mention(body, bot_name):
+                return hashlib.sha256(f"msg|{sender}|{body}".encode("utf-8", errors="ignore")).hexdigest()
+        return ""
 
     @staticmethod
     def _newly_appended_text(previous: str, current: str) -> str:

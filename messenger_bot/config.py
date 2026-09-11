@@ -32,6 +32,13 @@ class Settings:
     history_file: Path
     history_scrolls: int
     history_characters: int
+    # Game fields default so tests can build Settings without listing them;
+    # from_env() always supplies real values for the running bot.
+    games_state_file: Path = Path("bot_games.json")
+    quiz_seconds: float = 120.0
+    guess_seconds: float = 180.0
+    race_lobby_seconds: float = 45.0
+    race_frame_seconds: float = 4.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -72,4 +79,11 @@ class Settings:
             history_file=Path(os.getenv("BOT_HISTORY_FILE", root / "bot_history.txt")).expanduser().resolve(),
             history_scrolls=int(os.getenv("BOT_HISTORY_SCROLLS", "40")),
             history_characters=int(os.getenv("BOT_HISTORY_CHARACTERS", "120000")),
+            # Game economy and pacing. Credits persist in bot_games.json (never committed);
+            # the timers below control answer windows, lobby length, and race-frame speed.
+            games_state_file=Path(os.getenv("BOT_GAMES_FILE", root / "bot_games.json")).expanduser().resolve(),
+            quiz_seconds=float(os.getenv("BOT_QUIZ_SECONDS", "120")),
+            guess_seconds=float(os.getenv("BOT_GUESS_SECONDS", "180")),
+            race_lobby_seconds=float(os.getenv("BOT_RACE_LOBBY_SECONDS", "45")),
+            race_frame_seconds=float(os.getenv("BOT_RACE_FRAME_SECONDS", "4")),
         )
